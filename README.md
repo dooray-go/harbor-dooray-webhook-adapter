@@ -181,3 +181,14 @@ Harbor 의 프로젝트 > Webhooks 에서 다음 값을 입력한다.
 ├── Makefile                # build / test / cross-compile
 └── go.mod
 ```
+
+## Changelog
+
+### 2026-06-30 — feature/start-stop-scripts
+
+- 백그라운드 실행 스크립트 `start.sh` / `stop.sh` 추가
+  - `start.sh`: `make build` 후 어댑터를 백그라운드로 기동하고 PID 파일 기록
+  - `stop.sh`: PID 파일로 정상 종료 (SIGTERM → 미종료 시 SIGKILL 폴백)
+  - `CONFIG` / `PIDFILE` / `LOGFILE` 환경변수로 경로 재정의 가능
+- 런타임 산출물(`*.pid`, `*.log`)을 `.gitignore` 처리
+- README 에 백그라운드 실행 방법 문서화
