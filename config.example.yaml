@@ -1,0 +1,40 @@
+# harbor-dooray-webhook-adapter config
+
+# Address the HTTP server listens on. Default ":8080".
+listen_addr: ":8080"
+
+dooray:
+  # Fallback Dooray incoming webhook URL when no repository-specific route matches.
+  default_webhook_url: "https://nhncorp.dooray.com/services/XXXX/YYYY/ZZZZ"
+
+  # Optional: displayed bot name / icon in Dooray messages.
+  bot_name: "Harbor"
+  bot_icon_image: "https://goharbor.io/img/logos/harbor-icon-color.png"
+
+  # Optional: only forward these Harbor event types. Empty/omitted = forward all.
+  # Case-insensitive. Useful to drop noisy SBOM/scan side-effect events.
+  allowed_events:
+    - PUSH_ARTIFACT
+    - DELETE_ARTIFACT
+    - SCANNING_COMPLETED
+    - SCANNING_FAILED
+
+  # Optional: drop events whose operator contains any of these substrings
+  # (case-insensitive). Use it to silence the Trivy scanner (its operator looks
+  # like "robot$dooray+...-Trivy-...") while STILL forwarding pushes made by CI
+  # robot accounts. Empty/omitted = no operator filtering.
+  ignore_operators_containing:
+    - "-Trivy-"
+
+  # Optional: drop events whose artifacts are all digest-only (tag empty or
+  # "sha256:..."). These are accessory artifacts — SBOM, cosign signatures, scan
+  # reports — that Harbor pushes/deletes around scanning (e.g. the
+  # DELETE_ARTIFACT done by "admin" when an SBOM is regenerated), not images
+  # pushed/deleted by tag. Default false.
+  ignore_untagged: true
+
+  # Optional: per-repository routing. Key is the Harbor `repo_full_name`.
+  # Falls back to default_webhook_url if not listed.
+  repositories:
+    library/nginx: "https://nhncorp.dooray.com/services/XXXX/AAAA/BBBB"
+    team/api: "https://nhncorp.dooray.com/services/XXXX/CCCC/DDDD"

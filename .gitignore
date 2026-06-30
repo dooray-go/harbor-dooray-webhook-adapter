@@ -1,0 +1,14 @@
+# Local runtime config (use config.example.yaml as a template)
+config.yaml
+
+# Build output
+dist/
+# Stray local binary (built without -o into the repo root)
+/harbor-dooray-webhook-adapter
+
+# IDE / editor
+.idea/
+*.iml
+
+# oh-my-claudecode local state
+.omc/
