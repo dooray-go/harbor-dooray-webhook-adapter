@@ -12,3 +12,7 @@ dist/
 
 # oh-my-claudecode local state
 .omc/
+
+# Runtime artifacts from start.sh/stop.sh
+*.pid
+*.log
