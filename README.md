@@ -108,6 +108,24 @@ make build && ./dist/harbor-dooray-webhook-adapter -config config.yaml
 CONFIG=/etc/harbor-adapter.yaml LOGFILE=/var/log/harbor-adapter.log ./start.sh
 ```
 
+### 자동 재시작 (watchdog + cron)
+
+서비스가 죽으면 cron 으로 주기 점검해 자동 재시작한다.
+
+```bash
+./install-cron.sh install     # 매분 watchdog 실행하도록 crontab 등록 (기본)
+./install-cron.sh status      # 등록된 항목 확인
+./install-cron.sh remove      # 등록 해제
+
+# 점검 주기 변경 / 헬스 체크까지 사용
+INTERVAL="*/2 * * * *" ./install-cron.sh install
+HEALTH_URL="http://localhost:8080/healthz" ./install-cron.sh install
+```
+
+- `watchdog.sh` 는 PID 파일로 프로세스 생존을 확인하고, 죽었으면 `start.sh` 로 재시작한다. `HEALTH_URL` 을 주면 PID 가 살아 있어도 헬스 응답이 200 이 아니면 `stop.sh` 후 재시작한다.
+- `install-cron.sh` 가 등록하는 항목은 마커 주석(`# harbor-dooray-webhook-adapter-watchdog`)으로 관리되어 재실행해도 중복되지 않는다. `CONFIG`/`PIDFILE`/`LOGFILE`/`WATCHLOG`/`HEALTH_URL` 환경변수는 cron 항목에 그대로 전달된다.
+- watchdog 동작 기록은 `watchdog.log` 에 남는다.
+
 ### 크로스 컴파일
 
 ```bash
@@ -178,11 +196,20 @@ Harbor 의 프로젝트 > Webhooks 에서 다음 값을 입력한다.
 ├── config.example.yaml     # 설정 예제
 ├── start.sh                # 빌드 후 백그라운드 기동 (PID 기록)
 ├── stop.sh                 # PID 파일로 종료
+├── watchdog.sh             # 죽었으면 재시작 (cron 용)
+├── install-cron.sh         # watchdog cron 등록/해제
 ├── Makefile                # build / test / cross-compile
 └── go.mod
 ```
 
 ## Changelog
+
+### 2026-06-30 — feature/cron-auto-restart
+
+- 서비스가 죽으면 자동 재시작하는 watchdog + cron 스크립트 추가
+  - `watchdog.sh`: PID(및 선택적 `HEALTH_URL` 200 체크)로 생존 확인 후 죽었으면 `start.sh` 로 재시작. `mkdir` 기반 락으로 중복 실행 방지 (flock 불필요)
+  - `install-cron.sh`: watchdog 를 주기 실행하는 crontab 항목을 마커 기반으로 등록/해제 (idempotent). `INTERVAL` 로 주기 변경, 환경변수 passthrough
+- README 에 자동 재시작 사용법 문서화
 
 ### 2026-06-30 — feature/start-stop-scripts
 
