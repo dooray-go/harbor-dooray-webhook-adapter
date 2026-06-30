@@ -90,9 +90,22 @@ Harbor 는 스캔(Trivy)과 SBOM 생성 과정에서 일반 이미지처럼 push
 cp config.example.yaml config.yaml
 # config.yaml 의 URL 들을 실제 값으로 수정
 
-make run                         # go run .
+make run                         # go run . (포그라운드)
 # 또는
 make build && ./dist/harbor-dooray-webhook-adapter -config config.yaml
+```
+
+### 백그라운드 실행 (start.sh / stop.sh)
+
+```bash
+./start.sh    # make build 후 백그라운드 실행, PID 기록, 로그는 <app>.log 로
+./stop.sh     # PID 파일로 프로세스 정상 종료
+```
+
+환경변수로 경로를 바꿀 수 있다: `CONFIG`(기본 `config.yaml`), `PIDFILE`, `LOGFILE`.
+
+```bash
+CONFIG=/etc/harbor-adapter.yaml LOGFILE=/var/log/harbor-adapter.log ./start.sh
 ```
 
 ### 크로스 컴파일
@@ -163,6 +176,19 @@ Harbor 의 프로젝트 > Webhooks 에서 다음 값을 입력한다.
 ├── config.go               # YAML 로더, 라우팅·필터링 결정
 ├── config_test.go
 ├── config.example.yaml     # 설정 예제
+├── start.sh                # 빌드 후 백그라운드 기동 (PID 기록)
+├── stop.sh                 # PID 파일로 종료
 ├── Makefile                # build / test / cross-compile
 └── go.mod
 ```
+
+## Changelog
+
+### 2026-06-30 — feature/start-stop-scripts
+
+- 백그라운드 실행 스크립트 `start.sh` / `stop.sh` 추가
+  - `start.sh`: `make build` 후 어댑터를 백그라운드로 기동하고 PID 파일 기록
+  - `stop.sh`: PID 파일로 정상 종료 (SIGTERM → 미종료 시 SIGKILL 폴백)
+  - `CONFIG` / `PIDFILE` / `LOGFILE` 환경변수로 경로 재정의 가능
+- 런타임 산출물(`*.pid`, `*.log`)을 `.gitignore` 처리
+- README 에 백그라운드 실행 방법 문서화
