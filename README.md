@@ -1,3 +1,5 @@
+> 해당 기능은 비공식이며 , 커뮤니티 기여로 작성하는 도구입니다. NHN Dooray 서비스에서 제공하는 기능이 아님을 밝혀 둡니다.
+
 # harbor-dooray-webhook-adapter
 
 Harbor 의 webhook 을 받아서 Dooray incoming webhook 으로 전달하는 작은 HTTP 어댑터.
