@@ -204,6 +204,13 @@ Harbor 의 프로젝트 > Webhooks 에서 다음 값을 입력한다.
 
 ## Changelog
 
+### 2026-08-05 — bugfix/normalize-resource-url-scheme
+
+- Harbor `resource_url` 에 스킴이 없을 때 알림 링크가 깨지던 문제 수정
+  - Harbor 는 `resource_url` 을 스킴 없는 호스트 경로(`harbor.example.com/library/nginx:v1.0.0`)로 보내는 경우가 있는데, Dooray 가 이를 상대 링크로 해석해 자기 호스트(`https://nhnent.dooray.com/...`) 뒤에 붙여 잘못된 URL 이 생성됨
+  - `normalizeURL()` 로 `http://`/`https://` 가 없으면 `https://` 를 붙여 `titleLink` 및 본문 링크가 Harbor 를 정확히 가리키도록 함
+  - 회귀 방지 테스트 추가 (`TestNormalizeURL`, `TestBuildDoorayPayloadNormalizesSchemelessURL`)
+
 ### 2026-06-30 — feature/cron-auto-restart
 
 - 서비스가 죽으면 자동 재시작하는 watchdog + cron 스크립트 추가
