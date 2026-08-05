@@ -72,6 +72,20 @@ func shortDigest(d string) string {
 	return d
 }
 
+// normalizeURL ensures the URL carries a scheme. Harbor sends resource_url as a
+// bare host path (e.g. "harbor.example.com/library/nginx:v1.0.0"), which Dooray
+// treats as a relative link and rewrites against its own host. Prefixing the
+// scheme keeps the link pointing at Harbor.
+func normalizeURL(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		return raw
+	}
+	return "https://" + raw
+}
+
 type Adapter struct {
 	cfg    *Config
 	client *http.Client
@@ -103,7 +117,7 @@ func (a *Adapter) buildDoorayPayload(h *HarborWebhook) *DoorayWebhook {
 		}
 		line := fmt.Sprintf("- Tag: `%s` (digest `%s`)", tag, shortDigest(r.Digest))
 		if r.ResourceURL != "" {
-			line += fmt.Sprintf("\n  %s", r.ResourceURL)
+			line += fmt.Sprintf("\n  %s", normalizeURL(r.ResourceURL))
 		}
 		lines = append(lines, line)
 	}
@@ -111,7 +125,7 @@ func (a *Adapter) buildDoorayPayload(h *HarborWebhook) *DoorayWebhook {
 	title := fmt.Sprintf("[Harbor] %s — %s", h.Type, repo)
 	titleLink := ""
 	if len(h.EventData.Resources) > 0 {
-		titleLink = h.EventData.Resources[0].ResourceURL
+		titleLink = normalizeURL(h.EventData.Resources[0].ResourceURL)
 	}
 
 	return &DoorayWebhook{

@@ -78,6 +78,44 @@ func TestBuildDoorayPayload(t *testing.T) {
 	}
 }
 
+func TestBuildDoorayPayloadNormalizesSchemelessURL(t *testing.T) {
+	hook := HarborWebhook{
+		Type:     "PUSH_ARTIFACT",
+		Operator: "admin",
+		EventData: EventData{
+			Repository: Repository{RepoFullName: "dooray/dooray-idp"},
+			Resources: []Resource{
+				{Tag: "latest", ResourceURL: "harbor.op.internal.dooray.io/dooray/dooray-idp:latest"},
+			},
+		},
+	}
+
+	a := NewAdapter(newTestConfig("https://default.example/hook", nil))
+	att := a.buildDoorayPayload(&hook).Attachments[0]
+
+	want := "https://harbor.op.internal.dooray.io/dooray/dooray-idp:latest"
+	if att.TitleLink != want {
+		t.Errorf("title link = %q, want %q", att.TitleLink, want)
+	}
+	if !strings.Contains(att.Text, want) {
+		t.Errorf("text missing normalized url: %s", att.Text)
+	}
+}
+
+func TestNormalizeURL(t *testing.T) {
+	cases := map[string]string{
+		"":                               "",
+		"harbor.example.com/x:1":         "https://harbor.example.com/x:1",
+		"https://harbor.example.com/x:1": "https://harbor.example.com/x:1",
+		"http://harbor.example.com/x:1":  "http://harbor.example.com/x:1",
+	}
+	for in, want := range cases {
+		if got := normalizeURL(in); got != want {
+			t.Errorf("normalizeURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestEventColor(t *testing.T) {
 	cases := map[string]string{
 		"PUSH_ARTIFACT":   "green",
