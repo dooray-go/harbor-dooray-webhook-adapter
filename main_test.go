@@ -73,12 +73,14 @@ func TestBuildDoorayPayload(t *testing.T) {
 	if att.Color != "green" {
 		t.Errorf("expected green color for PUSH_ARTIFACT, got %s", att.Color)
 	}
-	if att.TitleLink != "https://example.com/library/nginx:v1.0.0" {
-		t.Errorf("unexpected title link: %s", att.TitleLink)
+	// resource_url is a docker pull reference, not a web page, so it must not
+	// be emitted as a clickable link.
+	if att.TitleLink != "" {
+		t.Errorf("expected no title link, got %q", att.TitleLink)
 	}
 }
 
-func TestBuildDoorayPayloadNormalizesSchemelessURL(t *testing.T) {
+func TestBuildDoorayPayloadShowsResourceAsPlainImageText(t *testing.T) {
 	hook := HarborWebhook{
 		Type:     "PUSH_ARTIFACT",
 		Operator: "admin",
@@ -93,26 +95,17 @@ func TestBuildDoorayPayloadNormalizesSchemelessURL(t *testing.T) {
 	a := NewAdapter(newTestConfig("https://default.example/hook", nil))
 	att := a.buildDoorayPayload(&hook).Attachments[0]
 
-	want := "https://harbor.op.internal.dooray.io/dooray/dooray-idp:latest"
-	if att.TitleLink != want {
-		t.Errorf("title link = %q, want %q", att.TitleLink, want)
+	if att.TitleLink != "" {
+		t.Errorf("expected no title link, got %q", att.TitleLink)
 	}
+	// The resource is shown as plain text (in backticks), not a link, and the
+	// bare schemeless reference is preserved verbatim.
+	want := "image : `harbor.op.internal.dooray.io/dooray/dooray-idp:latest`"
 	if !strings.Contains(att.Text, want) {
-		t.Errorf("text missing normalized url: %s", att.Text)
+		t.Errorf("text missing plain image reference %q: %s", want, att.Text)
 	}
-}
-
-func TestNormalizeURL(t *testing.T) {
-	cases := map[string]string{
-		"":                               "",
-		"harbor.example.com/x:1":         "https://harbor.example.com/x:1",
-		"https://harbor.example.com/x:1": "https://harbor.example.com/x:1",
-		"http://harbor.example.com/x:1":  "http://harbor.example.com/x:1",
-	}
-	for in, want := range cases {
-		if got := normalizeURL(in); got != want {
-			t.Errorf("normalizeURL(%q) = %q, want %q", in, got, want)
-		}
+	if strings.Contains(att.Text, "https://harbor.op.internal.dooray.io") {
+		t.Errorf("resource must not be turned into a link: %s", att.Text)
 	}
 }
 
