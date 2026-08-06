@@ -170,13 +170,14 @@ Harbor 의 프로젝트 > Webhooks 에서 다음 값을 입력한다.
   "attachments": [
     {
       "title": "[Harbor] PUSH_ARTIFACT — library/nginx",
-      "titleLink": "https://harbor.example.com/library/nginx:v1.0.0",
-      "text": "- Repository: `library/nginx`\n- Operator: `admin`\n- Time: 2026-06-19T21:27:06+09:00\n- Tag: `v1.0.0` (digest `sha256:a47921a2247b`)\n  https://harbor.example.com/library/nginx:v1.0.0",
+      "text": "- Repository: `library/nginx`\n- Operator: `admin`\n- Time: 2026-06-19T21:27:06+09:00\n- Tag: `v1.0.0` (digest `sha256:a47921a2247b`)\n  image : `harbor.example.com/library/nginx:v1.0.0`",
       "color": "green"
     }
   ]
 }
 ```
+
+> Harbor 의 `resource_url` 은 docker pull 용 이미지 참조 경로이지 브라우저로 열 수 있는 웹 페이지가 아니다. 따라서 링크(`titleLink`)로 만들지 않고 `image :` 뒤에 일반 텍스트로만 표시한다.
 
 색상 매핑:
 
@@ -205,6 +206,13 @@ Harbor 의 프로젝트 > Webhooks 에서 다음 값을 입력한다.
 ```
 
 ## Changelog
+
+### 2026-08-06 — bugfix/resource-url-as-plain-image-text
+
+- `resource_url` 을 링크 대신 `image :` 일반 텍스트로 표시하도록 변경
+  - Harbor `resource_url` 은 docker pull 참조 경로일 뿐 브라우저로 열면 404 가 나는 비웹 경로라, 링크로서 의미가 없음
+  - 무의미한 `titleLink` 를 제거하고, 본문에는 `image : \`<resource_url>\`` 형태의 백틱 일반 텍스트로만 노출 (스킴을 붙이지 않아 Dooray 가 링크로 재해석하지 않음)
+  - v0.2.1 에서 추가했던 `normalizeURL()` 은 더 이상 필요 없어 제거
 
 ### 2026-08-05 — bugfix/normalize-resource-url-scheme
 
