@@ -44,6 +44,10 @@ dooray:
   bot_name: "Harbor"
   bot_icon_image: "https://goharbor.io/img/logos/harbor-icon-color.png"
 
+  # SCANNING_COMPLETED 의 Critical CVE 가 이 값 이상이면 알림을 빨간색으로 (선택)
+  # 기본 1 (Critical 1건 이상이면 빨강). 0 으로 두면 빨강 표시 비활성.
+  critical_cve_threshold: 1
+
   # 전달할 이벤트 타입 화이트리스트 (선택, 대소문자 무시). 비우면 전체 전달
   allowed_events:
     - PUSH_ARTIFACT
@@ -71,6 +75,7 @@ dooray:
 - `dooray.default_webhook_url` 와 `dooray.repositories` 둘 다 비어 있으면 시작 시 실패한다.
 - `listen_addr` 미지정 시 `:8080` 사용.
 - `bot_name` / `bot_icon_image` 미지정 시 Harbor 기본값 사용.
+- `critical_cve_threshold` 미지정 시 `1` 사용(Critical 1건 이상이면 빨강). `0` 이면 빨강 표시 비활성.
 
 예제 파일은 `config.example.yaml` 참고.
 
@@ -188,6 +193,14 @@ Harbor 의 프로젝트 > Webhooks 에서 다음 값을 입력한다.
 | `QUOTA_WARNING`, `REPLICATION`                                  | yellow |
 | 그 외                                                           | blue   |
 
+`SCANNING_COMPLETED` 이벤트는 `event_data.resources[].scan_overview` 의 스캔 요약을 읽어 다음 줄을 추가한다:
+
+```
+- Vulnerabilities: 45 (Critical 5 / High 10 / Medium 20 / Low 10), fixable 30
+```
+
+Critical CVE 가 `critical_cve_threshold`(기본 1) 이상이면 이벤트 색상과 무관하게 알림을 **red** 로 표시한다.
+
 ## Project Layout
 
 ```
@@ -206,6 +219,12 @@ Harbor 의 프로젝트 > Webhooks 에서 다음 값을 입력한다.
 ```
 
 ## Changelog
+
+### 2026-08-06 — feature/scanning-cve-summary
+
+- `SCANNING_COMPLETED` 알림에 CVE 스캔 요약 표시
+  - `event_data.resources[].scan_overview`(리포트 MIME 타입으로 키가 동적인 map)에서 총 CVE 건수·심각도별 분포·fixable 건수를 추출해 `- Vulnerabilities: 45 (Critical 5 / High 10 / Medium 20 / Low 10), fixable 30` 한 줄로 추가
+  - Critical CVE 가 `critical_cve_threshold`(기본 1, `0` 이면 비활성) 이상이면 알림 색상을 이벤트 타입과 무관하게 **red** 로 강제
 
 ### 2026-08-06 — bugfix/resource-url-as-plain-image-text
 
