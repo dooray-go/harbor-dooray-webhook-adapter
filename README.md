@@ -8,6 +8,7 @@ Harbor 의 webhook 을 받아서 Dooray incoming webhook 으로 전달하는 작
 - 매핑에 없으면 기본 Dooray URL 로 폴백
 - 이벤트 종류에 따라 첨부 색상 자동 지정 (push=green, delete/quota_exceed=red 등)
 - 이벤트 타입 / operator / 태그 기준으로 노이즈(스캐너·SBOM accessory 등) 필터링
+- CVE allowlist / robot 계정 **만료일을 미리 감시**해 D-30~D-1 경고 (Harbor 가 webhook 을 주지 않는 영역)
 - 모든 요청을 access 로그로 기록, 에러 시 요청 바디까지 로깅
 
 ## Endpoints
@@ -68,6 +69,22 @@ dooray:
   repositories:
     library/nginx: "https://nhncorp.dooray.com/services/XXXX/AAAA/BBBB"
     team/api:      "https://nhncorp.dooray.com/services/XXXX/CCCC/DDDD"
+
+# Harbor API 접근 (선택). 아래 만료 감시에만 쓰이며, 생략하면 순수 webhook 수신기로 동작한다.
+harbor:
+  url: "https://harbor.example.com"
+  # 읽기 권한 robot 계정. 반드시 "never expires" 로 만들 것 (감시자가 먼저 만료되면 알림이 조용히 멎는다)
+  # robot 계정 목록 조회에는 system administrator 권한이 추가로 필요하다
+  username: "robot$dooray-expiry-watch"
+  password: "xxxxxxxx"
+
+  expiry_watch:
+    enabled: true              # 기본값: harbor.url 이 있으면 true
+    interval: "24h"            # 폴링 주기 (기본 24h)
+    warn_days: [30, 14, 7, 3, 1]  # 경고 단계 (기본값). 이미 만료된 항목은 매 폴링마다 재알림
+    projects: []               # 비우면 계정이 볼 수 있는 전체 프로젝트
+    watch_robots: true         # robot 계정 만료도 감시 (기본 true)
+    webhook_url: ""            # 비우면 dooray.default_webhook_url 사용
 ```
 
 검증 규칙:
@@ -76,6 +93,8 @@ dooray:
 - `listen_addr` 미지정 시 `:8080` 사용.
 - `bot_name` / `bot_icon_image` 미지정 시 Harbor 기본값 사용.
 - `critical_cve_threshold` 미지정 시 `1` 사용(Critical 1건 이상이면 빨강). `0` 이면 빨강 표시 비활성.
+- `harbor.url` 은 `http://` 또는 `https://` 로 시작해야 한다.
+- 만료 감시가 켜져 있으면 `harbor.username`/`harbor.password`, 양수 `interval`, 최소 1개의 `warn_days`, 알림 보낼 webhook URL 이 모두 필요하다.
 
 예제 파일은 `config.example.yaml` 참고.
 
@@ -88,6 +107,44 @@ Harbor 는 스캔(Trivy)과 SBOM 생성 과정에서 일반 이미지처럼 push
 3. **`allowed_events`** — 타입 기준. 위 두 필터를 통과한 이벤트 중 화이트리스트에 있는 타입만 전달한다.
 
 필터에 의해 무시된 요청은 사유와 함께 로그로 남고 `200 skipped` 를 반환한다.
+
+### 만료 감시 (CVE allowlist / robot 계정)
+
+**Harbor 는 pull 차단에 대한 webhook 을 발행하지 않는다.** CVE 임계값 검사와 cosign 서명 검사는 manifest GET 요청의 미들웨어 단계에서 수행되고, 위반 시 `412 PRECONDITION_FAILED` 로 요청을 끊는다. pull 이 성사되지 않았으니 `PULL_ARTIFACT` 도 발행되지 않고, 차단 전용 이벤트 타입도 존재하지 않는다. 즉 어댑터 입장에서 차단은 **아무 요청도 오지 않는 것**으로 나타나므로 webhook 만으로는 식별할 수 없다.
+
+이 중에서도 특히 위험한 것이 **만료**다. Harbor 는 만료된 CVE allowlist 를 통째로 무시한다 (`src/controller/scan/base_controller.go`):
+
+```go
+if !allowlistIsExpired && allowlist.Contains(v.ID) {
+    vulnerable.CVEBypassed = append(vulnerable.CVEBypassed, v.ID)
+    vulnerable.VulnerabilitiesCount--
+    continue
+}
+```
+
+`expires_at` 이 지나는 순간 예외 처리가 사라지고, 어제까지 통과하던 이미지가 그대로 임계값 초과로 판정되어 412 로 막힌다. 이미지도 스캔 결과도 정책도 바뀌지 않았고, 재스캔이 돌지 않으니 `SCANNING_COMPLETED` 도 뜨지 않는다. **Harbor 쪽에서 아무 신호도 나오지 않는 상태로 장애가 시작된다.** robot 계정 만료도 같은 성격의 사고다 (412 대신 401).
+
+`harbor.expiry_watch` 는 이를 Harbor API 로 주기 폴링해 미리 경고한다.
+
+| 감시 대상 | 엔드포인트 | 만료 필드 |
+|---|---|---|
+| 시스템 전역 CVE allowlist | `GET /api/v2.0/system/CVEAllowlist` | `expires_at` |
+| 프로젝트별 CVE allowlist | `GET /api/v2.0/projects/{name}` | `cve_allowlist.expires_at` |
+| robot 계정 | `GET /api/v2.0/robots` | `expires_at` |
+
+`expires_at` 은 unix seconds 이며, 없거나 `-1`(robot) 이면 무기한으로 보고 보고 대상에서 제외한다.
+
+동작 규칙:
+
+- **첫 폴링에서 전체 인벤토리를 1회 보고한다.** 만료일이 걸려 있다는 사실 자체를 아무도 기억하지 못하는 것이 실제 위험이므로, 아직 한참 남은 항목도 모두 나열한다.
+- 이후에는 `warn_days` 단계를 새로 넘어설 때만 알림을 보낸다. D-14 에 머무는 동안 매일 같은 알림이 반복되지 않는다.
+- **이미 만료된 항목은 매 폴링(=매일)마다 다시 알린다.** 조치될 때까지 사라지지 않는다.
+- **실제로 pull 을 막는 항목만 빨간색으로 처리한다.** `prevent_vul` 이 꺼진 프로젝트는 allowlist 가 만료돼도 pull 이 막히지 않으므로 정보성으로만 표시한다.
+- **`reuse_sys_cve_allowlist` 를 반영한다.** 시스템 allowlist 를 재사용하는 프로젝트는 자기 allowlist 가 무시되므로 그 만료일은 보고하지 않고, 대신 시스템 allowlist 알림에 "이 프로젝트들이 여기에 의존 중" 으로 묶어 표시한다. (Harbor 기본값이 `true` 이므로 메타데이터가 비어 있으면 재사용으로 간주한다.)
+- **감시기 자신이 멀어버린 경우도 알린다.** 폴링이 연속 3회 실패하면 빨간색으로 1회 보고하고, 복구되면 복구 알림을 보낸다. 스팸은 하지 않는다.
+- `/robots` 는 system administrator 권한을 요구하므로 403 이 나면 해당 항목만 건너뛰고 나머지 점검은 계속한다 (메시지에 `(check skipped)` 로 표기).
+
+> 근본 대책은 allowlist 를 **Never expires** 로 두는 것이다. 만료를 "예외는 시한부로만 허용한다"는 거버넌스 장치로 일부러 쓰는 경우에만 이 감시가 필요하다.
 
 ## Build & Run
 
@@ -209,6 +266,9 @@ Critical CVE 가 `critical_cve_threshold`(기본 1) 이상이면 이벤트 색�
 ├── main_test.go
 ├── config.go               # YAML 로더, 라우팅·필터링 결정
 ├── config_test.go
+├── harbor.go               # Harbor v2.0 API 읽기 전용 클라이언트 (만료 감시용)
+├── expiry.go               # CVE allowlist / robot 계정 만료 감시기
+├── expiry_test.go
 ├── config.example.yaml     # 설정 예제
 ├── start.sh                # 빌드 후 백그라운드 기동 (PID 기록)
 ├── stop.sh                 # PID 파일로 종료
@@ -219,6 +279,16 @@ Critical CVE 가 `critical_cve_threshold`(기본 1) 이상이면 이벤트 색�
 ```
 
 ## Changelog
+
+### 2026-08-13 — feature/expiry-watch
+
+- CVE allowlist / robot 계정 만료 감시 추가 (`harbor.expiry_watch`)
+  - 배경: Harbor 는 pull 차단(CVE 임계값 초과, cosign 미서명)에 대해 어떤 webhook 도 발행하지 않는다. 미들웨어가 manifest GET 단계에서 412 로 끊기 때문에 `PULL_ARTIFACT` 조차 발생하지 않는다
+  - 그중 CVE allowlist 의 `expires_at` 은 이미지·정책·스캔 결과가 전혀 바뀌지 않았는데도 어느 날 갑자기 pull 을 막는다. Harbor 가 만료된 allowlist 를 통째로 무시하기 때문(`!allowlistIsExpired && allowlist.Contains(v.ID)`)이고, 재스캔이 없으니 `SCANNING_COMPLETED` 로도 감지할 수 없다
+  - 대응으로 Harbor v2.0 API 를 주기 폴링(`/system/CVEAllowlist`, `/projects/{name}`, `/robots`)해 D-30/14/7/3/1 경고 + 만료 후 매일 재알림
+  - `prevent_vul` 이 꺼진 프로젝트는 만료돼도 pull 이 막히지 않으므로 정보성으로만, `reuse_sys_cve_allowlist` 인 프로젝트는 자기 allowlist 대신 시스템 allowlist 에 묶어서 보고
+  - 첫 폴링 시 만료일이 설정된 전체 항목을 1회 인벤토리로 보고 (잊힌 만료일이 실제 위험)
+  - 감시기 자신이 연속 3회 폴링 실패하면 빨간색으로 자가 보고, 복구 시 복구 알림
 
 ### 2026-08-06 — feature/scanning-cve-summary
 

@@ -43,3 +43,32 @@ dooray:
   repositories:
     library/nginx: "https://nhncorp.dooray.com/services/XXXX/AAAA/BBBB"
     team/api: "https://nhncorp.dooray.com/services/XXXX/CCCC/DDDD"
+
+# Optional: Harbor API access, used only by the expiry watch below. Omit the
+# whole section to run as a pure webhook receiver.
+harbor:
+  url: "https://harbor.example.com"
+  # A robot account with read access. IMPORTANT: give it "never expires",
+  # otherwise the watcher itself is the next thing to die silently.
+  # Listing robot accounts additionally requires a system administrator.
+  username: "robot$dooray-expiry-watch"
+  password: "xxxxxxxx"
+
+  # Warn before a CVE allowlist or robot account expires. Harbor emits NO
+  # webhook for these: an expired allowlist simply stops exempting its CVEs, so
+  # pulls that worked yesterday start failing with 412 and nothing is sent.
+  expiry_watch:
+    # Default true whenever harbor.url is set.
+    enabled: true
+    # How often to poll. Default "24h".
+    interval: "24h"
+    # Countdown steps that trigger a notification. Default [30, 14, 7, 3, 1].
+    # Anything already expired is re-announced on every poll.
+    warn_days: [30, 14, 7, 3, 1]
+    # Optional: limit the check to these projects. Empty/omitted = every project
+    # the account can see.
+    projects: []
+    # Optional: also track robot account expiry (401 failures). Default true.
+    watch_robots: true
+    # Optional: send expiry warnings elsewhere. Empty = default_webhook_url.
+    webhook_url: ""

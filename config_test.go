@@ -3,7 +3,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 )
 
 func writeTempConfig(t *testing.T, body string) string {
@@ -146,5 +148,134 @@ dooray:
 func TestLoadConfigMissingFile(t *testing.T) {
 	if _, err := LoadConfig(filepath.Join(t.TempDir(), "nope.yaml")); err == nil {
 		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestExpiryWatchDefaults(t *testing.T) {
+	path := writeTempConfig(t, `
+dooray:
+  default_webhook_url: https://example.com/default
+harbor:
+  url: https://harbor.example.com/
+  username: robot$watch
+  password: secret
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.ExpiryWatchEnabled() {
+		t.Error("a configured harbor.url should enable the expiry watch")
+	}
+	if cfg.Harbor.URL != "https://harbor.example.com" {
+		t.Errorf("trailing slash should be trimmed, got %q", cfg.Harbor.URL)
+	}
+	if cfg.Harbor.ExpiryWatch.interval != 24*time.Hour {
+		t.Errorf("default interval wrong: %v", cfg.Harbor.ExpiryWatch.interval)
+	}
+	want := []int{1, 3, 7, 14, 30}
+	if got := cfg.Harbor.ExpiryWatch.WarnDays; !slices.Equal(got, want) {
+		t.Errorf("default warn_days = %v, want %v", got, want)
+	}
+}
+
+func TestExpiryWatchDisabledWithoutHarborURL(t *testing.T) {
+	path := writeTempConfig(t, `
+dooray:
+  default_webhook_url: https://example.com/default
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ExpiryWatchEnabled() {
+		t.Error("expiry watch must stay off when no harbor.url is set")
+	}
+}
+
+func TestExpiryWatchConfigErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing credentials", `
+dooray:
+  default_webhook_url: https://example.com/default
+harbor:
+  url: https://harbor.example.com
+`},
+		{"bad interval", `
+dooray:
+  default_webhook_url: https://example.com/default
+harbor:
+  url: https://harbor.example.com
+  username: u
+  password: p
+  expiry_watch:
+    interval: "every day"
+`},
+		{"scheme-less url", `
+dooray:
+  default_webhook_url: https://example.com/default
+harbor:
+  url: harbor.example.com
+  username: u
+  password: p
+`},
+		{"warn_days all non-positive", `
+dooray:
+  default_webhook_url: https://example.com/default
+harbor:
+  url: https://harbor.example.com
+  username: u
+  password: p
+  expiry_watch:
+    warn_days: [0, -5]
+`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := LoadConfig(writeTempConfig(t, c.body)); err == nil {
+				t.Fatal("expected a config error")
+			}
+		})
+	}
+}
+
+func TestExpiryWatchExplicitlyDisabled(t *testing.T) {
+	// Disabled means the credential requirements do not apply.
+	path := writeTempConfig(t, `
+dooray:
+  default_webhook_url: https://example.com/default
+harbor:
+  url: https://harbor.example.com
+  expiry_watch:
+    enabled: false
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ExpiryWatchEnabled() {
+		t.Error("expiry_watch.enabled=false must win over a configured harbor.url")
+	}
+}
+
+// The shipped example must stay loadable, since it is what people copy.
+func TestLoadExampleConfig(t *testing.T) {
+	cfg, err := LoadConfig("config.example.yaml")
+	if err != nil {
+		t.Fatalf("config.example.yaml does not load: %v", err)
+	}
+	if !cfg.ExpiryWatchEnabled() {
+		t.Error("the example enables the expiry watch")
+	}
+}
+
+func TestNormalizeWarnDays(t *testing.T) {
+	got := normalizeWarnDays([]int{7, 30, 7, 0, -3, 1})
+	want := []int{1, 7, 30}
+	if !slices.Equal(got, want) {
+		t.Errorf("normalizeWarnDays = %v, want %v", got, want)
 	}
 }

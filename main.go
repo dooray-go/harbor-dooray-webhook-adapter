@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -331,6 +332,15 @@ func main() {
 	}
 
 	adapter := NewAdapter(cfg)
+
+	// Harbor never announces an expiring CVE allowlist or robot account, so the
+	// watcher polls for them alongside the webhook receiver.
+	if cfg.ExpiryWatchEnabled() {
+		go NewExpiryWatcher(cfg, adapter).Run(context.Background())
+	} else {
+		log.Printf("expiry watch disabled (set harbor.url to enable)")
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/webhook", adapter.webhookHandler)
