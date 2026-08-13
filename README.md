@@ -139,9 +139,53 @@ if !allowlistIsExpired && allowlist.Contains(v.ID) {
 |---|---|---|
 | 시스템 전역 CVE allowlist | `GET /api/v2.0/system/CVEAllowlist` | `expires_at` |
 | 프로젝트별 CVE allowlist | `GET /api/v2.0/projects/{name}` | `cve_allowlist.expires_at` |
-| robot 계정 | `GET /api/v2.0/robots` | `expires_at` |
+| 시스템 레벨 robot 계정 | `GET /api/v2.0/robots?q=Level=system` | `expires_at` |
+| 프로젝트 레벨 robot 계정 | `GET /api/v2.0/robots?q=Level=project,ProjectID=N` | `expires_at` |
 
 `expires_at` 은 unix seconds 이며, 없거나 `-1`(robot) 이면 무기한으로 보고 보고 대상에서 제외한다.
+
+robot 조회가 두 줄인 이유가 있다. Harbor 의 `ListRobot` 핸들러는 `Level` 쿼리가 없으면 **시스템 레벨로 고정**한다:
+
+```go
+} else {
+    level = robot.LEVELSYSTEM
+    query.Keywords["ProjectID"] = 0
+}
+```
+
+그래서 `GET /robots` 만 호출하면 프로젝트 레벨 robot 이 통째로 빠진다. CI 파이프라인이 쓰는 robot 은 대개 프로젝트 레벨이라, 정작 감시하려던 대상을 조용히 놓치게 된다. 프로젝트별로 따로 조회하는 이유다.
+
+#### 필요 권한
+
+감시 계정은 **시스템 레벨 robot** 으로 만든다(Administration > Robot Accounts). 프로젝트 안에서 만든 robot 은 시스템 스코프 권한을 가질 수 없어 robot 목록 조회가 어떤 설정으로도 통과하지 못한다.
+
+| 호출 | 요구 권한 | 근거 |
+|---|---|---|
+| `GET /system/CVEAllowlist` | 없음 (인증만) | 핸들러가 `RequireAuthenticated` 만 호출 |
+| `GET /projects` | 없음 (인증만) | 권한 체크 없이 보안 컨텍스트로 결과를 필터링 |
+| `GET /projects/{name}` | 프로젝트 스코프 `project: read` | `RequireProjectAccess(id, ActionRead)` |
+| `GET /robots` (system) | 시스템 스코프 `robot: list` | `RequireSystemAccess(ActionList, ResourceRobot)` |
+| `GET /robots` (project) | 프로젝트 스코프 `robot: list` | `RequireProjectAccess(ns, ActionList, ResourceRobot)` |
+
+정리하면 체크할 항목은 셋뿐이다.
+
+| 스코프 | 리소스 | 액션 | 비고 |
+|---|---|---|---|
+| Project | `project` | `read` | 필수 |
+| System | `robot` | `list` | `watch_robots: false` 면 불필요 |
+| Project | `robot` | `list` | 〃 |
+
+저장소·아티팩트 권한은 전혀 필요 없다. 프로젝트 스코프의 `project: read` 가 프로젝트 자체를 읽는 권한이 맞는지 헷갈릴 수 있는데, `getPolicyResource` 에 특례가 있어 `/project/{id}/project` 가 아니라 `/project/{id}` 로 매핑된다.
+
+**적용 범위는 "모든 프로젝트"(cover-all) 를 권장한다.** `ListProjects` 에 robot 전용 분기가 있어서, cover-all 이면 시스템 관리자처럼 전체를 반환하고 아니면 permission 에 명시된 프로젝트 + **public 프로젝트** 만 반환한다. 후자면 읽을 권한 없는 public 프로젝트가 목록에 섞여 매 폴링마다 `(check skipped) project "x" could not be read` 경고가 붙는다. cover-all 이 곤란하면 `expiry_watch.projects` 에 대상을 명시해 목록 조회 자체를 건너뛰면 된다.
+
+인스턴스에서 실제로 할당 가능한 권한은 관리자 계정으로 확인할 수 있다:
+
+```bash
+curl -u '<admin>:<pw>' https://harbor.example.com/api/v2.0/permissions | jq '.system[], .project[] | select(.resource=="robot")'
+```
+
+여기서 `robot` 이 안 나오는 버전이면 robot 계정에 부여할 수 없으므로 `watch_robots: false` 로 두는 것이 맞다.
 
 동작 규칙:
 
@@ -151,7 +195,8 @@ if !allowlistIsExpired && allowlist.Contains(v.ID) {
 - **실제로 pull 을 막는 항목만 빨간색으로 처리한다.** `prevent_vul` 이 꺼진 프로젝트는 allowlist 가 만료돼도 pull 이 막히지 않으므로 정보성으로만 표시한다.
 - **`reuse_sys_cve_allowlist` 를 반영한다.** 시스템 allowlist 를 재사용하는 프로젝트는 자기 allowlist 가 무시되므로 그 만료일은 보고하지 않고, 대신 시스템 allowlist 알림에 "이 프로젝트들이 여기에 의존 중" 으로 묶어 표시한다. (Harbor 기본값이 `true` 이므로 메타데이터가 비어 있으면 재사용으로 간주한다.)
 - **감시기 자신이 멀어버린 경우도 알린다.** 폴링이 연속 3회 실패하면 빨간색으로 1회 보고하고, 복구되면 복구 알림을 보낸다. 스팸은 하지 않는다.
-- `/robots` 는 system administrator 권한을 요구하므로 403 이 나면 해당 항목만 건너뛰고 나머지 점검은 계속한다 (메시지에 `(check skipped)` 로 표기).
+- **권한이 부족한 조회는 그 항목만 건너뛴다.** 시스템 robot 조회와 프로젝트 robot 조회는 별개의 권한이라 한쪽이 403 이어도 다른 쪽은 살아있고, allowlist 점검은 그대로 진행된다. 건너뛴 항목은 메시지에 `(check skipped)` 로 표기된다.
+- **프로젝트별 robot 조회 거부는 한 줄로 합친다.** 프로젝트 30개에서 403 이 나도 경고 30줄이 아니라, 프로젝트 이름을 나열한 한 줄이 된다.
 
 #### 알림 대상 (Dooray / Slack)
 
@@ -308,6 +353,15 @@ Critical CVE 가 `critical_cve_threshold`(기본 1) 이상이면 이벤트 색�
 ```
 
 ## Changelog
+
+### 2026-08-13 — feature/expiry-watch (3)
+
+- **프로젝트 레벨 robot 계정 만료 누락 수정**
+  - Harbor `ListRobot` 은 `Level` 쿼리가 없으면 시스템 레벨로 고정하므로(`query.Keywords["ProjectID"] = 0`), 기존 `GET /robots` 호출은 프로젝트 레벨 robot 을 전혀 보지 못했다. CI 용 robot 은 대개 프로젝트 레벨이라 감시 대상의 상당수가 조용히 빠져 있었다
+  - 이미 프로젝트를 순회하고 있으므로 그 루프에서 `GET /robots?q=Level=project,ProjectID=N` 을 프로젝트별로 함께 조회하도록 변경
+  - 프로젝트별 조회 거부(403)는 프로젝트 이름을 나열한 **한 줄** 경고로 합쳐 프로젝트 수만큼 경고가 늘어나지 않게 함
+- robot 조회 실패 문구 정정: "system admin required" 는 사실이 아니었다. 필요한 것은 시스템 스코프 `robot: list` 권한이며 robot 계정에도 부여 가능하다. 계정이 **시스템 레벨** robot 이어야 한다는 조건과 함께 정확히 안내하도록 수정
+- README 에 호출별 요구 권한 표와 체크할 권한 3개, cover-all 권장 이유를 문서화
 
 ### 2026-08-13 — feature/expiry-watch (2)
 

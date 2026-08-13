@@ -167,14 +167,30 @@ func (c *HarborClient) ProjectNames(ctx context.Context) ([]string, error) {
 	}
 }
 
-// Robots lists robot accounts. Harbor exposes this endpoint to system
-// administrators only, so a project-scoped account gets 403 here — callers
-// should treat the error as a skipped check rather than a fatal one.
-func (c *HarborClient) Robots(ctx context.Context) ([]HarborRobot, error) {
+// SystemRobots lists system-level robot accounts. It needs the system-scope
+// "robot: list" permission, and the caller must itself be a system-level robot
+// (or a system administrator); anything else gets 403 here, which callers
+// should treat as a skipped check rather than a fatal one.
+func (c *HarborClient) SystemRobots(ctx context.Context) ([]HarborRobot, error) {
+	return c.listRobots(ctx, "Level=system")
+}
+
+// ProjectRobots lists the robot accounts owned by one project. Harbor's
+// /robots endpoint silently defaults to level=system, so project robots are
+// invisible unless the level and project are named explicitly — and a CI
+// robot is usually a project one. Needs the project-scope "robot: list"
+// permission.
+func (c *HarborClient) ProjectRobots(ctx context.Context, projectID int64) ([]HarborRobot, error) {
+	return c.listRobots(ctx, "Level=project,ProjectID="+strconv.FormatInt(projectID, 10))
+}
+
+// listRobots pages through /robots with Harbor's "q" filter syntax.
+func (c *HarborClient) listRobots(ctx context.Context, filter string) ([]HarborRobot, error) {
 	var robots []HarborRobot
 	for page := 1; ; page++ {
 		var batch []HarborRobot
-		path := "/robots?page=" + strconv.Itoa(page) + "&page_size=" + strconv.Itoa(harborPageSize)
+		path := fmt.Sprintf("/robots?q=%s&page=%d&page_size=%d",
+			url.QueryEscape(filter), page, harborPageSize)
 		if err := c.get(ctx, path, false, &batch); err != nil {
 			return nil, err
 		}

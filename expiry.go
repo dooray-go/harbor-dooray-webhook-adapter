@@ -239,12 +239,29 @@ func (w *ExpiryWatcher) collect(ctx context.Context) ([]ExpiryFinding, []string,
 	// and defer to the system allowlist — they are what makes the system
 	// allowlist's expiry dangerous.
 	var systemReliant []string
+	// robotDenied collects projects whose robot listing was refused, so one
+	// warning names them all instead of one warning per project.
+	var robotDenied []string
+	var robotDeniedErr error
 	for _, name := range names {
 		p, err := w.harbor.Project(ctx, name)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("project %q could not be read: %v", name, err))
 			continue
 		}
+
+		// Project-level robots are the ones CI pipelines usually run as, and
+		// Harbor never returns them from the system-level listing.
+		if w.watchRobots {
+			robots, err := w.harbor.ProjectRobots(ctx, p.ProjectID)
+			if err != nil {
+				robotDenied = append(robotDenied, name)
+				robotDeniedErr = err
+			} else {
+				findings = append(findings, robotFindings(robots, now, name)...)
+			}
+		}
+
 		enforcing := p.Metadata.PreventsVulnerable()
 		if p.Metadata.ReusesSystemAllowlist() {
 			if enforcing {
@@ -288,31 +305,52 @@ func (w *ExpiryWatcher) collect(ctx context.Context) ([]ExpiryFinding, []string,
 	}
 
 	if w.watchRobots {
-		robots, err := w.harbor.Robots(ctx)
+		robots, err := w.harbor.SystemRobots(ctx)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("robot accounts could not be listed (system admin required): %v", err))
+			// Harbor checks RequireSystemAccess(list, robot) here, which a robot
+			// account can satisfy — it needs the system-scope "robot: list"
+			// permission, and must itself be a system-level robot. Say so
+			// rather than implying a human admin account is required.
+			warnings = append(warnings, fmt.Sprintf("system-level robot accounts could not be listed; the watcher needs to be a system-level robot with the system-scope \"robot: list\" permission: %v", err))
 		}
-		for _, r := range robots {
-			exp, ok := r.Expiry()
-			if !ok {
-				continue
-			}
-			detail := fmt.Sprintf("level=%s", r.Level)
-			if r.Disable {
-				detail += "; already disabled"
-			}
-			findings = append(findings, ExpiryFinding{
-				Kind:      kindRobot,
-				Name:      r.Name,
-				ExpiresAt: exp,
-				DaysLeft:  daysUntil(exp, now),
-				Enforcing: !r.Disable,
-				Detail:    detail,
-			})
+		findings = append(findings, robotFindings(robots, now, "")...)
+
+		if len(robotDenied) > 0 {
+			warnings = append(warnings, fmt.Sprintf("project-level robot accounts could not be listed for %d project(s) (%s); the watcher needs the project-scope \"robot: list\" permission there: %v",
+				len(robotDenied), strings.Join(robotDenied, ", "), robotDeniedErr))
 		}
 	}
 
 	return findings, warnings, nil
+}
+
+// robotFindings converts robots into findings, dropping the ones that never
+// expire. project is empty for system-level robots.
+func robotFindings(robots []HarborRobot, now time.Time, project string) []ExpiryFinding {
+	var findings []ExpiryFinding
+	for _, r := range robots {
+		exp, ok := r.Expiry()
+		if !ok {
+			continue
+		}
+		detail := fmt.Sprintf("level=%s", r.Level)
+		if project != "" {
+			detail = fmt.Sprintf("level=%s (%s)", r.Level, project)
+		}
+		if r.Disable {
+			detail += "; already disabled"
+		}
+		findings = append(findings, ExpiryFinding{
+			Kind:      kindRobot,
+			Name:      r.Name,
+			ExpiresAt: exp,
+			DaysLeft:  daysUntil(exp, now),
+			// A disabled robot is already broken, so its expiry changes nothing.
+			Enforcing: !r.Disable,
+			Detail:    detail,
+		})
+	}
+	return findings
 }
 
 // policyDetail summarises the project settings that decide whether an expired

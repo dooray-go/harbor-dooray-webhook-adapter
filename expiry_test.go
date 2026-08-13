@@ -19,12 +19,16 @@ func days(n float64) time.Duration { return time.Duration(n * float64(24*time.Ho
 // is the JSON body for that endpoint; status overrides turn an endpoint into a
 // failure.
 type fakeHarbor struct {
-	system      CVEAllowlist
-	projects    map[string]HarborProject
-	order       []string
-	robots      []HarborRobot
-	projectsErr int
-	robotsErr   int
+	system   CVEAllowlist
+	projects map[string]HarborProject
+	order    []string
+	// robots are the system-level ones; projectRobots is keyed by project ID,
+	// mirroring Harbor's split between the two listings.
+	robots           []HarborRobot
+	projectRobots    map[int64][]HarborRobot
+	projectsErr      int
+	robotsErr        int
+	projectRobotsErr int
 
 	requests int
 }
@@ -64,6 +68,22 @@ func (f *fakeHarbor) start(t *testing.T) *httptest.Server {
 		write(w, p)
 	})
 	mux.HandleFunc("/api/v2.0/robots", func(w http.ResponseWriter, r *http.Request) {
+		// Harbor splits the two listings by the "q" filter; a request without
+		// an explicit project only ever yields system-level robots.
+		query := r.URL.Query().Get("q")
+		if strings.Contains(query, "Level=project") {
+			if f.projectRobotsErr != 0 {
+				http.Error(w, "forbidden", f.projectRobotsErr)
+				return
+			}
+			var pid int64
+			if _, err := fmt.Sscanf(query, "Level=project,ProjectID=%d", &pid); err != nil {
+				http.Error(w, "bad q: "+query, http.StatusBadRequest)
+				return
+			}
+			write(w, f.projectRobots[pid])
+			return
+		}
 		if f.robotsErr != 0 {
 			http.Error(w, "forbidden", f.robotsErr)
 			return
@@ -93,11 +113,18 @@ func sampleHarbor() *fakeHarbor {
 			Items:     []CVEAllowlistItem{{CVEID: "CVE-1"}, {CVEID: "CVE-2"}},
 		},
 		order: []string{"alpha", "beta", "gamma"},
+		projectRobots: map[int64][]HarborRobot{
+			// A CI robot living in a project — invisible to the system-level
+			// listing, which is exactly why it has to be asked for per project.
+			1: {{ID: 3, Name: "robot$alpha+ci", Level: "project", ExpiresAt: testNow.Add(days(4)).Unix()}},
+			3: {{ID: 4, Name: "robot$gamma+forever", Level: "project", ExpiresAt: -1}},
+		},
 		projects: map[string]HarborProject{
 			// Own allowlist, policy enforced: the dangerous case.
 			"alpha": {
-				Name:     "alpha",
-				Metadata: ProjectMetadata{PreventVul: "true", Severity: "High", ReuseSysCVEAllowlist: "false"},
+				ProjectID: 1,
+				Name:      "alpha",
+				Metadata:  ProjectMetadata{PreventVul: "true", Severity: "High", ReuseSysCVEAllowlist: "false"},
 				CVEAllowlist: CVEAllowlist{
 					ExpiresAt: epoch(testNow.Add(days(5))),
 					Items:     []CVEAllowlistItem{{CVEID: "CVE-3"}},
@@ -106,14 +133,16 @@ func sampleHarbor() *fakeHarbor {
 			// Reuses the system allowlist (metadata absent = Harbor's default)
 			// and enforces, so it is what makes the system allowlist risky.
 			"beta": {
+				ProjectID:    2,
 				Name:         "beta",
 				Metadata:     ProjectMetadata{PreventVul: "true", Severity: "Critical"},
 				CVEAllowlist: CVEAllowlist{ExpiresAt: epoch(testNow.Add(days(1)))},
 			},
 			// Own allowlist expiring soon, but the policy is off: informational.
 			"gamma": {
-				Name:     "gamma",
-				Metadata: ProjectMetadata{PreventVul: "false", ReuseSysCVEAllowlist: "false"},
+				ProjectID: 3,
+				Name:      "gamma",
+				Metadata:  ProjectMetadata{PreventVul: "false", ReuseSysCVEAllowlist: "false"},
 				CVEAllowlist: CVEAllowlist{
 					ExpiresAt: epoch(testNow.Add(days(2))),
 					Items:     []CVEAllowlistItem{{CVEID: "CVE-4"}},
@@ -183,8 +212,8 @@ func TestCollectFindsEveryExpiringThing(t *testing.T) {
 	if len(warnings) != 0 {
 		t.Fatalf("expected no warnings, got %v", warnings)
 	}
-	if len(findings) != 4 {
-		t.Fatalf("expected 4 findings, got %d: %+v", len(findings), findings)
+	if len(findings) != 5 {
+		t.Fatalf("expected 5 findings, got %d: %+v", len(findings), findings)
 	}
 
 	alpha := findFinding(t, findings, kindProjectAllowlist, "alpha")
@@ -218,8 +247,64 @@ func TestCollectFindsEveryExpiringThing(t *testing.T) {
 		t.Errorf("robot$ci: got daysLeft=%d, want 3", robot.DaysLeft)
 	}
 	for _, f := range findings {
-		if f.Name == "robot$forever" {
+		if f.Name == "robot$forever" || f.Name == "robot$gamma+forever" {
 			t.Error("a robot with expires_at=-1 never expires and must not be reported")
+		}
+	}
+
+	// Project-level robots are what CI usually runs as, and Harbor's default
+	// /robots listing never returns them.
+	ciRobot := findFinding(t, findings, kindRobot, "robot$alpha+ci")
+	if ciRobot.DaysLeft != 4 {
+		t.Errorf("robot$alpha+ci: got daysLeft=%d, want 4", ciRobot.DaysLeft)
+	}
+	if !strings.Contains(ciRobot.Detail, "alpha") {
+		t.Errorf("a project robot should name its project, got %q", ciRobot.Detail)
+	}
+}
+
+func TestCollectAggregatesProjectRobotDenials(t *testing.T) {
+	h := sampleHarbor()
+	h.projectRobotsErr = http.StatusForbidden
+	w, _ := newWatcher(t, h)
+
+	findings, warnings, err := w.collect(context.Background())
+	if err != nil {
+		t.Fatalf("a 403 on project robots must not fail the whole poll: %v", err)
+	}
+	// The 3 allowlist findings and the system robot survive.
+	if len(findings) != 4 {
+		t.Errorf("expected 4 findings to survive, got %d: %+v", len(findings), findings)
+	}
+	// Three projects were refused, but that must not become three warnings.
+	if len(warnings) != 1 {
+		t.Fatalf("expected the per-project denials to collapse into 1 warning, got %v", warnings)
+	}
+	for _, name := range []string{"alpha", "beta", "gamma", "robot: list"} {
+		if !strings.Contains(warnings[0], name) {
+			t.Errorf("warning should mention %q: %s", name, warnings[0])
+		}
+	}
+}
+
+func TestCollectSkipsRobotsEntirelyWhenDisabled(t *testing.T) {
+	h := sampleHarbor()
+	// Both listings would fail loudly if they were called at all.
+	h.robotsErr = http.StatusForbidden
+	h.projectRobotsErr = http.StatusForbidden
+	w, _ := newWatcher(t, h)
+	w.watchRobots = false
+
+	findings, warnings, err := w.collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("watch_robots=false must not warn about robots: %v", warnings)
+	}
+	for _, f := range findings {
+		if f.Kind == kindRobot {
+			t.Errorf("watch_robots=false must not report robots, got %+v", f)
 		}
 	}
 }
@@ -233,11 +318,14 @@ func TestCollectDegradesWhenRobotsForbidden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a 403 on /robots must not fail the whole poll: %v", err)
 	}
-	if len(findings) != 3 {
-		t.Errorf("expected the 3 allowlist findings to survive, got %d", len(findings))
+	// The 3 allowlist findings survive, and so does the project-level robot —
+	// the two robot listings are separate calls with separate permissions.
+	if len(findings) != 4 {
+		t.Errorf("expected 4 findings to survive, got %d: %+v", len(findings), findings)
 	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "robot") {
-		t.Errorf("expected a warning about robots, got %v", warnings)
+	findFinding(t, findings, kindRobot, "robot$alpha+ci")
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "system-level robot") {
+		t.Errorf("expected one warning naming the system-level listing, got %v", warnings)
 	}
 }
 

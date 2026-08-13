@@ -48,9 +48,17 @@ dooray:
 # whole section to run as a pure webhook receiver.
 harbor:
   url: "https://harbor.example.com"
-  # A robot account with read access. IMPORTANT: give it "never expires",
-  # otherwise the watcher itself is the next thing to die silently.
-  # Listing robot accounts additionally requires a system administrator.
+  # A SYSTEM-level robot account (Administration > Robot Accounts), applied to
+  # all projects. IMPORTANT: give it "never expires", otherwise the watcher
+  # itself is the next thing to die silently.
+  #
+  # Permissions to tick — three, and nothing else:
+  #   Project scope: project -> read        (required)
+  #   System  scope: robot   -> list        (only if watch_robots is true)
+  #   Project scope: robot   -> list        (only if watch_robots is true)
+  #
+  # A robot created inside a project cannot hold system-scope permissions, so
+  # it can never list system-level robots no matter what is granted.
   username: "robot$dooray-expiry-watch"
   password: "xxxxxxxx"
 
