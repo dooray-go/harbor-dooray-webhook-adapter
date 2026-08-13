@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -28,6 +29,22 @@ type Resource struct {
 	Digest      string `json:"digest"`
 	Tag         string `json:"tag"`
 	ResourceURL string `json:"resource_url"`
+	// ScanOverview carries Harbor's vulnerability scan summary on
+	// SCANNING_COMPLETED events. It is keyed by the report's MIME type
+	// (e.g. "application/vnd.security.vulnerability.report; version=1.1").
+	ScanOverview map[string]ScanReport `json:"scan_overview"`
+}
+
+type ScanReport struct {
+	ScanStatus string      `json:"scan_status"`
+	Severity   string      `json:"severity"`
+	Summary    ScanSummary `json:"summary"`
+}
+
+type ScanSummary struct {
+	Total   int            `json:"total"`
+	Fixable int            `json:"fixable"`
+	Summary map[string]int `json:"summary"`
 }
 
 type Repository struct {
@@ -96,6 +113,7 @@ func (a *Adapter) buildDoorayPayload(h *HarborWebhook) *DoorayWebhook {
 	if h.OccurAt > 0 {
 		lines = append(lines, fmt.Sprintf("- Time: %s", time.Unix(h.OccurAt, 0).Format(time.RFC3339)))
 	}
+	criticalTotal := 0
 	for _, r := range h.EventData.Resources {
 		tag := r.Tag
 		if tag == "" {
@@ -110,9 +128,21 @@ func (a *Adapter) buildDoorayPayload(h *HarborWebhook) *DoorayWebhook {
 			line += fmt.Sprintf("\n  image : `%s`", r.ResourceURL)
 		}
 		lines = append(lines, line)
+
+		if s, ok := scanSummary(r); ok {
+			lines = append(lines, vulnLine(s))
+			criticalTotal += s.Summary["Critical"]
+		}
 	}
 
 	title := fmt.Sprintf("[Harbor] %s — %s", h.Type, repo)
+
+	color := eventColor(h.Type)
+	// A Critical vulnerability count at or above the configured threshold turns
+	// the whole notification red, overriding the event-type color.
+	if t := a.cfg.Dooray.CriticalCVEThreshold; t != nil && *t > 0 && criticalTotal >= *t {
+		color = "red"
+	}
 
 	return &DoorayWebhook{
 		BotName:      a.cfg.Dooray.BotName,
@@ -122,10 +152,62 @@ func (a *Adapter) buildDoorayPayload(h *HarborWebhook) *DoorayWebhook {
 			{
 				Title: title,
 				Text:  strings.Join(lines, "\n"),
-				Color: eventColor(h.Type),
+				Color: color,
 			},
 		},
 	}
+}
+
+// severityOrder lists vulnerability severities from most to least severe so the
+// breakdown renders in a stable, meaningful order.
+var severityOrder = []string{"Critical", "High", "Medium", "Low", "Negligible", "Unknown", "None"}
+
+// scanSummary returns the vulnerability summary from a resource's Harbor
+// scan_overview and whether one was present. The scan_overview map is keyed by
+// the report's MIME type; keys are sorted so selection is deterministic when
+// (rarely) more than one report is attached.
+func scanSummary(r Resource) (ScanSummary, bool) {
+	if len(r.ScanOverview) == 0 {
+		return ScanSummary{}, false
+	}
+	keys := make([]string, 0, len(r.ScanOverview))
+	for k := range r.ScanOverview {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return r.ScanOverview[keys[0]].Summary, true
+}
+
+// vulnLine renders a one-line vulnerability summary, e.g.
+// "- Vulnerabilities: 45 (Critical 5 / High 10 / Medium 20 / Low 10), fixable 30".
+func vulnLine(s ScanSummary) string {
+	line := fmt.Sprintf("- Vulnerabilities: %d", s.Total)
+	if parts := severityBreakdown(s.Summary); len(parts) > 0 {
+		line += fmt.Sprintf(" (%s)", strings.Join(parts, " / "))
+	}
+	line += fmt.Sprintf(", fixable %d", s.Fixable)
+	return line
+}
+
+// severityBreakdown formats per-severity counts (>0 only) in severityOrder,
+// appending any unrecognized severities alphabetically at the end.
+func severityBreakdown(m map[string]int) []string {
+	var parts []string
+	seen := make(map[string]bool)
+	for _, sev := range severityOrder {
+		if c := m[sev]; c > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", sev, c))
+		}
+		seen[sev] = true
+	}
+	var extra []string
+	for sev, c := range m {
+		if !seen[sev] && c > 0 {
+			extra = append(extra, fmt.Sprintf("%s %d", sev, c))
+		}
+	}
+	sort.Strings(extra)
+	return append(parts, extra...)
 }
 
 func (a *Adapter) postToDooray(url string, payload *DoorayWebhook) error {

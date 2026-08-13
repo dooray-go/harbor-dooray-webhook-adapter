@@ -19,6 +19,12 @@ type DoorayConfig struct {
 	BotIconImage      string            `yaml:"bot_icon_image"`
 	Repositories      map[string]string `yaml:"repositories"`
 
+	// CriticalCVEThreshold colors the Dooray notification red when a scan
+	// report's Critical vulnerability count reaches this value (default 1).
+	// Set to 0 to disable the red override. Only affects SCANNING_COMPLETED
+	// events, which are the ones that carry a scan summary.
+	CriticalCVEThreshold *int `yaml:"critical_cve_threshold"`
+
 	// AllowedEvents is a whitelist of Harbor event types to forward. Empty
 	// means all event types are forwarded. Comparison is case-insensitive.
 	AllowedEvents []string `yaml:"allowed_events"`
@@ -59,6 +65,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Dooray.BotIconImage == "" {
 		c.Dooray.BotIconImage = "https://goharbor.io/img/logos/harbor-icon-color.png"
+	}
+	if c.Dooray.CriticalCVEThreshold == nil {
+		def := 1
+		c.Dooray.CriticalCVEThreshold = &def
 	}
 }
 

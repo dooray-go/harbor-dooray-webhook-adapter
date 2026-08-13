@@ -109,6 +109,84 @@ func TestBuildDoorayPayloadShowsResourceAsPlainImageText(t *testing.T) {
 	}
 }
 
+// scanHook builds a SCANNING_COMPLETED webhook whose single resource carries a
+// scan_overview with the given severity counts.
+func scanHook(sev map[string]int) *HarborWebhook {
+	total, fixable := 0, 0
+	for _, c := range sev {
+		total += c
+	}
+	fixable = total / 2
+	return &HarborWebhook{
+		Type:     "SCANNING_COMPLETED",
+		Operator: "auto",
+		EventData: EventData{
+			Repository: Repository{RepoFullName: "dooray/form-api"},
+			Resources: []Resource{{
+				Tag:         "latest",
+				ResourceURL: "harbor.op.internal.dooray.io/dooray/form-api:latest",
+				ScanOverview: map[string]ScanReport{
+					"application/vnd.security.vulnerability.report; version=1.1": {
+						ScanStatus: "Success",
+						Severity:   "Critical",
+						Summary:    ScanSummary{Total: total, Fixable: fixable, Summary: sev},
+					},
+				},
+			}},
+		},
+	}
+}
+
+func TestBuildDoorayPayloadRendersVulnerabilitySummary(t *testing.T) {
+	h := scanHook(map[string]int{"Critical": 5, "High": 10, "Medium": 20, "Low": 10})
+	a := NewAdapter(newTestConfig("https://default.example/hook", nil))
+	att := a.buildDoorayPayload(h).Attachments[0]
+
+	want := "- Vulnerabilities: 45 (Critical 5 / High 10 / Medium 20 / Low 10), fixable 22"
+	if !strings.Contains(att.Text, want) {
+		t.Errorf("missing vulnerability summary line %q in:\n%s", want, att.Text)
+	}
+}
+
+func TestBuildDoorayPayloadCriticalTurnsRed(t *testing.T) {
+	a := NewAdapter(newTestConfig("https://default.example/hook", nil)) // default threshold 1
+
+	red := a.buildDoorayPayload(scanHook(map[string]int{"Critical": 1, "High": 3})).Attachments[0]
+	if red.Color != "red" {
+		t.Errorf("expected red when Critical >= threshold, got %q", red.Color)
+	}
+
+	// No Critical → keep the normal SCANNING_COMPLETED (green) color.
+	green := a.buildDoorayPayload(scanHook(map[string]int{"High": 8, "Low": 2})).Attachments[0]
+	if green.Color != "green" {
+		t.Errorf("expected green when no Critical, got %q", green.Color)
+	}
+}
+
+func TestBuildDoorayPayloadCriticalThresholdConfigurable(t *testing.T) {
+	three := 3
+	cfg := newTestConfig("https://default.example/hook", nil)
+	cfg.Dooray.CriticalCVEThreshold = &three
+	a := NewAdapter(cfg)
+
+	below := a.buildDoorayPayload(scanHook(map[string]int{"Critical": 2})).Attachments[0]
+	if below.Color == "red" {
+		t.Errorf("Critical 2 below threshold 3 should not be red")
+	}
+	atOrAbove := a.buildDoorayPayload(scanHook(map[string]int{"Critical": 3})).Attachments[0]
+	if atOrAbove.Color != "red" {
+		t.Errorf("Critical 3 at threshold 3 should be red, got %q", atOrAbove.Color)
+	}
+
+	// Threshold 0 disables the red override entirely.
+	zero := 0
+	cfg.Dooray.CriticalCVEThreshold = &zero
+	off := a.buildDoorayPayload(scanHook(map[string]int{"Critical": 99})).Attachments[0]
+	if off.Color == "red" {
+		t.Errorf("threshold 0 should disable red override")
+	}
+}
+
 func TestEventColor(t *testing.T) {
 	cases := map[string]string{
 		"PUSH_ARTIFACT":   "green",

@@ -11,6 +11,11 @@ dooray:
   bot_name: "Harbor"
   bot_icon_image: "https://goharbor.io/img/logos/harbor-icon-color.png"
 
+  # Optional: color the notification red when a SCANNING_COMPLETED scan report
+  # has this many Critical CVEs or more. Default 1 (any Critical → red).
+  # Set to 0 to disable the red override.
+  critical_cve_threshold: 1
+
   # Optional: only forward these Harbor event types. Empty/omitted = forward all.
   # Case-insensitive. Useful to drop noisy SBOM/scan side-effect events.
   allowed_events:
