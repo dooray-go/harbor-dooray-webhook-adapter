@@ -127,9 +127,22 @@ func sampleHarbor() *fakeHarbor {
 	}
 }
 
+// captureNotifier records notifications instead of delivering them.
+type captureNotifier struct {
+	sent []Notification
+	err  error
+}
+
+func (c *captureNotifier) Notify(n Notification) error {
+	c.sent = append(c.sent, n)
+	return c.err
+}
+
+func (c *captureNotifier) Target() string { return "capture" }
+
 // newWatcher wires a watcher against the fake Harbor, capturing notifications
 // instead of posting them.
-func newWatcher(t *testing.T, h *fakeHarbor) (*ExpiryWatcher, *[]*DoorayWebhook) {
+func newWatcher(t *testing.T, h *fakeHarbor) (*ExpiryWatcher, *captureNotifier) {
 	t.Helper()
 	srv := h.start(t)
 
@@ -142,14 +155,11 @@ func newWatcher(t *testing.T, h *fakeHarbor) (*ExpiryWatcher, *[]*DoorayWebhook)
 		t.Fatalf("validate: %v", err)
 	}
 
-	var sent []*DoorayWebhook
+	capture := &captureNotifier{}
 	w := NewExpiryWatcher(cfg, NewAdapter(cfg))
 	w.now = func() time.Time { return testNow }
-	w.post = func(_ string, p *DoorayWebhook) error {
-		sent = append(sent, p)
-		return nil
-	}
-	return w, &sent
+	w.notifier = capture
+	return w, capture
 }
 
 func findFinding(t *testing.T, findings []ExpiryFinding, kind, name string) ExpiryFinding {
@@ -245,22 +255,22 @@ func TestFirstPollReportsFullInventory(t *testing.T) {
 	w, sent := newWatcher(t, sampleHarbor())
 	w.checkOnce(context.Background())
 
-	if len(*sent) != 1 {
-		t.Fatalf("expected 1 notification, got %d", len(*sent))
+	if len(sent.sent) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(sent.sent))
 	}
-	att := (*sent)[0].Attachments[0]
-	if !strings.Contains(att.Title, "Expiry watch started") {
-		t.Errorf("unexpected title %q", att.Title)
+	n := sent.sent[0]
+	if !strings.Contains(n.Title, "Expiry watch started") {
+		t.Errorf("unexpected title %q", n.Title)
 	}
 	// Every dated item is listed, even the ones still far out, because an
 	// expiry date nobody remembers setting is the actual hazard.
 	for _, want := range []string{"alpha", "gamma", "system", "robot$ci"} {
-		if !strings.Contains(att.Text, want) {
-			t.Errorf("inventory missing %q:\n%s", want, att.Text)
+		if !strings.Contains(n.Body, want) {
+			t.Errorf("inventory missing %q:\n%s", want, n.Body)
 		}
 	}
-	if att.Color != "red" {
-		t.Errorf("robot$ci is 3 days out and enforcing, so color should be red, got %q", att.Color)
+	if n.Color != "red" {
+		t.Errorf("robot$ci is 3 days out and enforcing, so color should be red, got %q", n.Color)
 	}
 }
 
@@ -270,8 +280,8 @@ func TestSteadyStateDoesNotRepeatWarnings(t *testing.T) {
 	w.checkOnce(context.Background())
 	w.checkOnce(context.Background())
 
-	if len(*sent) != 1 {
-		t.Fatalf("nothing changed, so only the inventory should have been sent; got %d", len(*sent))
+	if len(sent.sent) != 1 {
+		t.Fatalf("nothing changed, so only the inventory should have been sent; got %d", len(sent.sent))
 	}
 }
 
@@ -283,15 +293,15 @@ func TestWarningFiresWhenCrossingAStep(t *testing.T) {
 	w.now = func() time.Time { return testNow.Add(days(2)) }
 	w.checkOnce(context.Background())
 
-	if len(*sent) != 2 {
-		t.Fatalf("expected an expiry warning, got %d notifications", len(*sent))
+	if len(sent.sent) != 2 {
+		t.Fatalf("expected an expiry warning, got %d notifications", len(sent.sent))
 	}
-	att := (*sent)[1].Attachments[0]
-	if !strings.Contains(att.Text, "alpha") {
-		t.Errorf("warning should name alpha:\n%s", att.Text)
+	n := sent.sent[1]
+	if !strings.Contains(n.Body, "alpha") {
+		t.Errorf("warning should name alpha:\n%s", n.Body)
 	}
-	if !strings.Contains(att.Text, "412") {
-		t.Errorf("warning should explain the 412 consequence:\n%s", att.Text)
+	if !strings.Contains(n.Body, "412") {
+		t.Errorf("warning should explain the 412 consequence:\n%s", n.Body)
 	}
 }
 
@@ -302,21 +312,21 @@ func TestExpiredItemsAreReannouncedDaily(t *testing.T) {
 	// Six days on, alpha is one day past its expiry.
 	w.now = func() time.Time { return testNow.Add(days(6)) }
 	w.checkOnce(context.Background())
-	first := len(*sent)
+	first := len(sent.sent)
 
 	// The next day it is still broken and must be raised again.
 	w.now = func() time.Time { return testNow.Add(days(7)) }
 	w.checkOnce(context.Background())
 
-	if len(*sent) <= first {
+	if len(sent.sent) <= first {
 		t.Fatal("an already-expired allowlist must be re-announced every poll day")
 	}
-	att := (*sent)[len(*sent)-1].Attachments[0]
-	if !strings.Contains(att.Text, "EXPIRED") {
-		t.Errorf("expected an EXPIRED marker:\n%s", att.Text)
+	n := sent.sent[len(sent.sent)-1]
+	if !strings.Contains(n.Body, "EXPIRED") {
+		t.Errorf("expected an EXPIRED marker:\n%s", n.Body)
 	}
-	if att.Color != "red" {
-		t.Errorf("expected red for an expired enforcing allowlist, got %q", att.Color)
+	if n.Color != "red" {
+		t.Errorf("expected red for an expired enforcing allowlist, got %q", n.Color)
 	}
 }
 
@@ -329,29 +339,29 @@ func TestWatcherReportsItsOwnBlindness(t *testing.T) {
 	for i := 0; i < failureThreshold; i++ {
 		w.checkOnce(context.Background())
 	}
-	if len(*sent) != 2 {
+	if len(sent.sent) != 2 {
 		t.Fatalf("expected exactly one blindness alert after %d failures, got %d notifications",
-			failureThreshold, len(*sent))
+			failureThreshold, len(sent.sent))
 	}
-	att := (*sent)[1].Attachments[0]
-	if !strings.Contains(att.Title, "blind") || att.Color != "red" {
-		t.Errorf("unexpected blindness alert: %+v", att)
+	n := sent.sent[1]
+	if !strings.Contains(n.Title, "blind") || n.Color != "red" {
+		t.Errorf("unexpected blindness alert: %+v", n)
 	}
 
 	// Further failures must not spam.
 	w.checkOnce(context.Background())
-	if len(*sent) != 2 {
-		t.Fatalf("blindness alert repeated; got %d notifications", len(*sent))
+	if len(sent.sent) != 2 {
+		t.Fatalf("blindness alert repeated; got %d notifications", len(sent.sent))
 	}
 
 	// Recovery is worth saying out loud.
 	h.projectsErr = 0
 	w.checkOnce(context.Background())
-	if len(*sent) != 3 {
-		t.Fatalf("expected a recovery notice, got %d notifications", len(*sent))
+	if len(sent.sent) != 3 {
+		t.Fatalf("expected a recovery notice, got %d notifications", len(sent.sent))
 	}
-	if !strings.Contains((*sent)[2].Attachments[0].Title, "recovered") {
-		t.Errorf("unexpected recovery notice: %+v", (*sent)[2].Attachments[0])
+	if !strings.Contains(sent.sent[2].Title, "recovered") {
+		t.Errorf("unexpected recovery notice: %+v", sent.sent[2])
 	}
 }
 

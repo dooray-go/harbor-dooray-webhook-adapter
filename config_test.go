@@ -261,6 +261,125 @@ harbor:
 	}
 }
 
+// harborConfig builds a loadable config with the given expiry_watch body.
+func harborConfig(watch string) string {
+	return `
+dooray:
+  default_webhook_url: https://example.com/default
+harbor:
+  url: https://harbor.example.com
+  username: u
+  password: p
+  expiry_watch:` + watch
+}
+
+func TestExpiryNotifyTargetRouting(t *testing.T) {
+	cases := []struct {
+		name       string
+		watch      string
+		wantDooray string
+		wantSlack  string
+	}{
+		{
+			// Nothing specified: keep posting where everything else goes.
+			name:       "falls back to the default dooray url",
+			watch:      "\n    interval: 24h",
+			wantDooray: "https://example.com/default",
+		},
+		{
+			// Slack-only must NOT keep quietly posting to Dooray as well.
+			name:      "slack only suppresses the dooray fallback",
+			watch:     "\n    slack:\n      webhook_url: https://hooks.slack.com/services/T/B/X",
+			wantSlack: "https://hooks.slack.com/services/T/B/X",
+		},
+		{
+			name:       "both destinations when both are set",
+			watch:      "\n    dooray:\n      webhook_url: https://example.com/expiry\n    slack:\n      webhook_url: https://hooks.slack.com/services/T/B/X",
+			wantDooray: "https://example.com/expiry",
+			wantSlack:  "https://hooks.slack.com/services/T/B/X",
+		},
+		{
+			// The flat spelling shipped before Slack support existed.
+			name:       "deprecated flat webhook_url still routes to dooray",
+			watch:      "\n    webhook_url: https://example.com/legacy",
+			wantDooray: "https://example.com/legacy",
+		},
+		{
+			name:       "nested dooray url wins over the flat alias",
+			watch:      "\n    webhook_url: https://example.com/legacy\n    dooray:\n      webhook_url: https://example.com/nested",
+			wantDooray: "https://example.com/nested",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg, err := LoadConfig(writeTempConfig(t, harborConfig(c.watch)))
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if got := cfg.expiryDoorayURL(); got != c.wantDooray {
+				t.Errorf("dooray target = %q, want %q", got, c.wantDooray)
+			}
+			if got := cfg.Harbor.ExpiryWatch.Slack.WebhookURL; got != c.wantSlack {
+				t.Errorf("slack target = %q, want %q", got, c.wantSlack)
+			}
+		})
+	}
+}
+
+func TestSlackDefaultsFollowBotIdentity(t *testing.T) {
+	cfg, err := LoadConfig(writeTempConfig(t, `
+dooray:
+  default_webhook_url: https://example.com/default
+  bot_name: MyBot
+  bot_icon_image: https://example.com/icon.png
+harbor:
+  url: https://harbor.example.com
+  username: u
+  password: p
+  expiry_watch:
+    slack:
+      webhook_url: https://hooks.slack.com/services/T/B/X
+      channel: harbor-alerts
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	s := cfg.Harbor.ExpiryWatch.Slack
+	if s.Channel != "#harbor-alerts" {
+		t.Errorf("channel should be normalized to #harbor-alerts, got %q", s.Channel)
+	}
+	if s.Username != "MyBot" {
+		t.Errorf("slack username should default to the dooray bot name, got %q", s.Username)
+	}
+	if s.IconURL != "https://example.com/icon.png" {
+		t.Errorf("slack icon should default to the dooray bot icon, got %q", s.IconURL)
+	}
+}
+
+func TestExpiryWatchNeedsADestination(t *testing.T) {
+	// No default_webhook_url, no expiry target: the watcher would have nowhere
+	// to report, so refuse at startup rather than warn into the void.
+	_, err := LoadConfig(writeTempConfig(t, `
+dooray:
+  repositories:
+    library/nginx: https://example.com/nginx
+harbor:
+  url: https://harbor.example.com
+  username: u
+  password: p
+`))
+	if err == nil {
+		t.Fatal("expected an error when the expiry watch has no destination")
+	}
+}
+
+func TestSlackWebhookURLNeedsScheme(t *testing.T) {
+	_, err := LoadConfig(writeTempConfig(t, harborConfig("\n    slack:\n      webhook_url: hooks.slack.com/services/T/B/X")))
+	if err == nil {
+		t.Fatal("expected an error for a scheme-less slack webhook_url")
+	}
+}
+
 // The shipped example must stay loadable, since it is what people copy.
 func TestLoadExampleConfig(t *testing.T) {
 	cfg, err := LoadConfig("config.example.yaml")

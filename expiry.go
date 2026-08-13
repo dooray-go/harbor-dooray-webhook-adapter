@@ -98,8 +98,7 @@ func expiryBucket(daysLeft int, warnDays []int) string {
 type ExpiryWatcher struct {
 	cfg         *Config
 	harbor      *HarborClient
-	post        func(url string, payload *DoorayWebhook) error
-	url         string
+	notifier    Notifier
 	interval    time.Duration
 	warnDays    []int
 	watchRobots bool
@@ -120,15 +119,10 @@ type ExpiryWatcher struct {
 
 func NewExpiryWatcher(cfg *Config, adapter *Adapter) *ExpiryWatcher {
 	w := cfg.Harbor.ExpiryWatch
-	url := w.WebhookURL
-	if url == "" {
-		url = cfg.Dooray.DefaultWebhookURL
-	}
 	return &ExpiryWatcher{
 		cfg:         cfg,
 		harbor:      NewHarborClient(cfg.Harbor),
-		post:        adapter.postToDooray,
-		url:         url,
+		notifier:    buildExpiryNotifiers(cfg, adapter),
 		interval:    w.interval,
 		warnDays:    w.WarnDays,
 		watchRobots: w.WatchRobots == nil || *w.WatchRobots,
@@ -142,8 +136,8 @@ func NewExpiryWatcher(cfg *Config, adapter *Adapter) *ExpiryWatcher {
 const failureThreshold = 3
 
 func (w *ExpiryWatcher) Run(ctx context.Context) {
-	log.Printf("expiry watch: polling %s every %s (warn at D-%s)",
-		w.cfg.Harbor.URL, w.interval, joinInts(w.warnDays, "/D-"))
+	log.Printf("expiry watch: polling %s every %s (warn at D-%s, notify %s)",
+		w.cfg.Harbor.URL, w.interval, joinInts(w.warnDays, "/D-"), w.notifier.Target())
 	w.checkOnce(ctx)
 
 	t := time.NewTicker(w.interval)
@@ -165,30 +159,22 @@ func (w *ExpiryWatcher) checkOnce(ctx context.Context) {
 		log.Printf("expiry watch: poll failed (%d consecutive): %v", w.failures, err)
 		if w.failures >= failureThreshold && !w.failureAlert {
 			w.failureAlert = true
-			w.send(&DoorayWebhook{
-				BotName:      w.cfg.Dooray.BotName,
-				BotIconImage: w.cfg.Dooray.BotIconImage,
-				Text:         "Harbor expiry watch: *polling failed*",
-				Attachments: []DoorayAttachment{{
-					Title: "[Harbor] Expiry watch is blind",
-					Text: fmt.Sprintf("- %d consecutive polls failed; expiry dates are no longer being checked.\n- Last error: %v\n- Check `harbor.url` and the watcher's credentials (an expired watcher robot account will do exactly this).",
-						w.failures, err),
-					Color: "red",
-				}},
+			w.send(Notification{
+				Summary: "Harbor expiry watch: *polling failed*",
+				Title:   "[Harbor] Expiry watch is blind",
+				Body: fmt.Sprintf("- %d consecutive polls failed; expiry dates are no longer being checked.\n- Last error: %v\n- Check `harbor.url` and the watcher's credentials (an expired watcher robot account will do exactly this).",
+					w.failures, err),
+				Color: "red",
 			})
 		}
 		return
 	}
 	if w.failureAlert {
-		w.send(&DoorayWebhook{
-			BotName:      w.cfg.Dooray.BotName,
-			BotIconImage: w.cfg.Dooray.BotIconImage,
-			Text:         "Harbor expiry watch: *recovered*",
-			Attachments: []DoorayAttachment{{
-				Title: "[Harbor] Expiry watch recovered",
-				Text:  "- Polling Harbor succeeded again; expiry dates are being checked.",
-				Color: "green",
-			}},
+		w.send(Notification{
+			Summary: "Harbor expiry watch: *recovered*",
+			Title:   "[Harbor] Expiry watch recovered",
+			Body:    "- Polling Harbor succeeded again; expiry dates are being checked.",
+			Color:   "green",
 		})
 	}
 	w.failures, w.failureAlert = 0, false
@@ -203,7 +189,7 @@ func (w *ExpiryWatcher) checkOnce(ctx context.Context) {
 		for _, f := range findings {
 			w.alerted[f.key()] = expiryBucket(f.DaysLeft, w.warnDays)
 		}
-		w.send(w.inventoryPayload(findings, warnings))
+		w.send(w.inventoryNotification(findings, warnings))
 		return
 	}
 
@@ -222,16 +208,12 @@ func (w *ExpiryWatcher) checkOnce(ctx context.Context) {
 		}
 		return
 	}
-	w.send(w.alertPayload(due, warnings))
+	w.send(w.alertNotification(due, warnings))
 }
 
-func (w *ExpiryWatcher) send(payload *DoorayWebhook) {
-	if w.url == "" {
-		log.Printf("expiry watch: no dooray webhook configured; skipping notification")
-		return
-	}
-	if err := w.post(w.url, payload); err != nil {
-		log.Printf("expiry watch: post to dooray failed: %v", err)
+func (w *ExpiryWatcher) send(n Notification) {
+	if err := w.notifier.Notify(n); err != nil {
+		log.Printf("expiry watch: notification failed: %v", err)
 	}
 }
 
@@ -359,7 +341,7 @@ func sortFindings(f []ExpiryFinding) {
 	})
 }
 
-func (w *ExpiryWatcher) inventoryPayload(findings []ExpiryFinding, warnings []string) *DoorayWebhook {
+func (w *ExpiryWatcher) inventoryNotification(findings []ExpiryFinding, warnings []string) Notification {
 	var lines []string
 	if len(findings) == 0 {
 		lines = append(lines, "- No CVE allowlist or robot account has an expiry date set. Nothing can expire out from under a pull.")
@@ -372,19 +354,15 @@ func (w *ExpiryWatcher) inventoryPayload(findings []ExpiryFinding, warnings []st
 	}
 	lines = append(lines, warningLines(warnings)...)
 
-	return &DoorayWebhook{
-		BotName:      w.cfg.Dooray.BotName,
-		BotIconImage: w.cfg.Dooray.BotIconImage,
-		Text:         "Harbor expiry watch: *started*",
-		Attachments: []DoorayAttachment{{
-			Title: "[Harbor] Expiry watch started",
-			Text:  strings.Join(lines, "\n"),
-			Color: inventoryColor(findings),
-		}},
+	return Notification{
+		Summary: "Harbor expiry watch: *started*",
+		Title:   "[Harbor] Expiry watch started",
+		Body:    strings.Join(lines, "\n"),
+		Color:   inventoryColor(findings),
 	}
 }
 
-func (w *ExpiryWatcher) alertPayload(due []ExpiryFinding, warnings []string) *DoorayWebhook {
+func (w *ExpiryWatcher) alertNotification(due []ExpiryFinding, warnings []string) Notification {
 	lines := make([]string, 0, len(due)+2)
 	for _, f := range due {
 		lines = append(lines, f.line())
@@ -392,15 +370,11 @@ func (w *ExpiryWatcher) alertPayload(due []ExpiryFinding, warnings []string) *Do
 	lines = append(lines, "- An expired CVE allowlist stops exempting its CVEs, so pulls that worked yesterday fail with 412 and no Harbor event is emitted.")
 	lines = append(lines, warningLines(warnings)...)
 
-	return &DoorayWebhook{
-		BotName:      w.cfg.Dooray.BotName,
-		BotIconImage: w.cfg.Dooray.BotIconImage,
-		Text:         "Harbor expiry watch: *expiry approaching*",
-		Attachments: []DoorayAttachment{{
-			Title: fmt.Sprintf("[Harbor] Expiry warning — %d item(s)", len(due)),
-			Text:  strings.Join(lines, "\n"),
-			Color: alertColor(due),
-		}},
+	return Notification{
+		Summary: "Harbor expiry watch: *expiry approaching*",
+		Title:   fmt.Sprintf("[Harbor] Expiry warning — %d item(s)", len(due)),
+		Body:    strings.Join(lines, "\n"),
+		Color:   alertColor(due),
 	}
 }
 

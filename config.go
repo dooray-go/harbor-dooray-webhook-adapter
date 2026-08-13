@@ -44,12 +44,37 @@ type ExpiryWatchConfig struct {
 	// WatchRobots also tracks robot account expiry (default true). Listing
 	// robots requires a system administrator account.
 	WatchRobots *bool `yaml:"watch_robots"`
-	// WebhookURL overrides where expiry warnings are sent. Empty falls back to
-	// dooray.default_webhook_url.
+	// WebhookURL is the deprecated flat spelling of dooray.webhook_url, kept
+	// working so existing configs do not break.
 	WebhookURL string `yaml:"webhook_url"`
+
+	// Dooray and Slack are the notification destinations. Setting both sends
+	// every warning to both.
+	Dooray ExpiryDoorayConfig `yaml:"dooray"`
+	Slack  SlackConfig        `yaml:"slack"`
 
 	// interval is Interval parsed; 0 when it could not be parsed.
 	interval time.Duration
+}
+
+// ExpiryDoorayConfig routes expiry warnings to a Dooray incoming webhook.
+type ExpiryDoorayConfig struct {
+	// WebhookURL overrides where warnings go. Empty falls back to
+	// dooray.default_webhook_url, unless Slack is configured instead.
+	WebhookURL string `yaml:"webhook_url"`
+}
+
+// SlackConfig routes expiry warnings to a Slack incoming webhook.
+type SlackConfig struct {
+	WebhookURL string `yaml:"webhook_url"`
+	// Channel overrides the destination channel. NOTE: modern Slack app
+	// webhooks are bound to the channel chosen at install time and ignore this
+	// field; only legacy custom-integration webhooks honour it. To target
+	// several channels, create one webhook per channel.
+	Channel   string `yaml:"channel"`
+	Username  string `yaml:"username"`
+	IconEmoji string `yaml:"icon_emoji"`
+	IconURL   string `yaml:"icon_url"`
 }
 
 type DoorayConfig struct {
@@ -122,6 +147,34 @@ func (c *Config) applyDefaults() {
 		w.WarnDays = []int{30, 14, 7, 3, 1}
 	}
 	w.WarnDays = normalizeWarnDays(w.WarnDays)
+
+	// Accept the pre-Slack flat spelling of the Dooray target.
+	if w.Dooray.WebhookURL == "" {
+		w.Dooray.WebhookURL = w.WebhookURL
+	}
+	w.Slack.WebhookURL = strings.TrimSpace(w.Slack.WebhookURL)
+	w.Slack.Channel = normalizeSlackChannel(w.Slack.Channel)
+	if w.Slack.Username == "" {
+		w.Slack.Username = c.Dooray.BotName
+	}
+	if w.Slack.IconEmoji == "" && w.Slack.IconURL == "" {
+		w.Slack.IconURL = c.Dooray.BotIconImage
+	}
+}
+
+// expiryDoorayURL returns the Dooray webhook expiry warnings should go to, or
+// "" when Dooray is not a destination. The global default_webhook_url is only
+// used as a fallback when no destination at all was configured, so that a
+// Slack-only setup does not silently keep posting to Dooray.
+func (c *Config) expiryDoorayURL() string {
+	w := c.Harbor.ExpiryWatch
+	if w.Dooray.WebhookURL != "" {
+		return w.Dooray.WebhookURL
+	}
+	if w.Slack.WebhookURL != "" {
+		return ""
+	}
+	return c.Dooray.DefaultWebhookURL
 }
 
 // normalizeWarnDays drops non-positive entries, removes duplicates and sorts
@@ -169,8 +222,11 @@ func (c *Config) validate() error {
 	if len(w.WarnDays) == 0 {
 		return fmt.Errorf("harbor.expiry_watch.warn_days must contain at least one positive number of days")
 	}
-	if w.WebhookURL == "" && c.Dooray.DefaultWebhookURL == "" {
-		return fmt.Errorf("harbor.expiry_watch needs dooray.default_webhook_url or harbor.expiry_watch.webhook_url to send warnings to")
+	if s := w.Slack.WebhookURL; s != "" && !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
+		return fmt.Errorf("harbor.expiry_watch.slack.webhook_url must start with http:// or https://")
+	}
+	if c.expiryDoorayURL() == "" && w.Slack.WebhookURL == "" {
+		return fmt.Errorf("harbor.expiry_watch needs a destination: set dooray.default_webhook_url, harbor.expiry_watch.dooray.webhook_url or harbor.expiry_watch.slack.webhook_url")
 	}
 	return nil
 }

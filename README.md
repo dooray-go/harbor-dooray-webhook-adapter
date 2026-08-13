@@ -84,7 +84,15 @@ harbor:
     warn_days: [30, 14, 7, 3, 1]  # 경고 단계 (기본값). 이미 만료된 항목은 매 폴링마다 재알림
     projects: []               # 비우면 계정이 볼 수 있는 전체 프로젝트
     watch_robots: true         # robot 계정 만료도 감시 (기본 true)
-    webhook_url: ""            # 비우면 dooray.default_webhook_url 사용
+
+    # 알림 대상. 둘 다 설정하면 양쪽 모두로 보낸다
+    dooray:
+      webhook_url: ""          # 비우면 dooray.default_webhook_url 사용
+    slack:
+      webhook_url: "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXX"
+      channel: "#harbor-alerts"  # "#" 없이 써도 자동으로 붙는다
+      username: "Harbor"         # 생략 시 dooray.bot_name
+      icon_emoji: ":whale:"      # 생략 시 dooray.bot_icon_image 를 icon_url 로
 ```
 
 검증 규칙:
@@ -94,7 +102,8 @@ harbor:
 - `bot_name` / `bot_icon_image` 미지정 시 Harbor 기본값 사용.
 - `critical_cve_threshold` 미지정 시 `1` 사용(Critical 1건 이상이면 빨강). `0` 이면 빨강 표시 비활성.
 - `harbor.url` 은 `http://` 또는 `https://` 로 시작해야 한다.
-- 만료 감시가 켜져 있으면 `harbor.username`/`harbor.password`, 양수 `interval`, 최소 1개의 `warn_days`, 알림 보낼 webhook URL 이 모두 필요하다.
+- 만료 감시가 켜져 있으면 `harbor.username`/`harbor.password`, 양수 `interval`, 최소 1개의 `warn_days`, 그리고 알림 대상(아래) 이 모두 필요하다.
+- `harbor.expiry_watch.slack.webhook_url` 도 `http://` 또는 `https://` 로 시작해야 한다.
 
 예제 파일은 `config.example.yaml` 참고.
 
@@ -143,6 +152,24 @@ if !allowlistIsExpired && allowlist.Contains(v.ID) {
 - **`reuse_sys_cve_allowlist` 를 반영한다.** 시스템 allowlist 를 재사용하는 프로젝트는 자기 allowlist 가 무시되므로 그 만료일은 보고하지 않고, 대신 시스템 allowlist 알림에 "이 프로젝트들이 여기에 의존 중" 으로 묶어 표시한다. (Harbor 기본값이 `true` 이므로 메타데이터가 비어 있으면 재사용으로 간주한다.)
 - **감시기 자신이 멀어버린 경우도 알린다.** 폴링이 연속 3회 실패하면 빨간색으로 1회 보고하고, 복구되면 복구 알림을 보낸다. 스팸은 하지 않는다.
 - `/robots` 는 system administrator 권한을 요구하므로 403 이 나면 해당 항목만 건너뛰고 나머지 점검은 계속한다 (메시지에 `(check skipped)` 로 표기).
+
+#### 알림 대상 (Dooray / Slack)
+
+만료 경고는 Dooray 와 Slack 중 하나 또는 양쪽으로 보낼 수 있다. 결정 규칙은 다음 세 줄이 전부다.
+
+| 설정 | 전송 대상 |
+|---|---|
+| 둘 다 미설정 | `dooray.default_webhook_url` |
+| `slack.webhook_url` 만 설정 | Slack (Dooray 로는 보내지 않는다) |
+| 양쪽 설정 | Dooray + Slack 모두 |
+
+Slack 만 설정했을 때 `dooray.default_webhook_url` 로도 계속 보내면 의도치 않은 이중 알림이 되므로, Slack 이 설정되면 기본 URL 폴백은 끈다. Harbor **이벤트 전달**(`/webhook` 수신분)은 이 설정과 무관하게 계속 Dooray 로만 간다.
+
+한쪽 전송이 실패해도 다른 쪽 전송은 진행한다. Slack 장애 때문에 Dooray 경고까지 같이 잃으면 안 되기 때문이다. 실패한 대상은 로그에 남는다.
+
+> **Slack `channel` 필드 주의.** 요즘 Slack 앱 incoming webhook 은 설치 시점에 고른 채널에 고정되어 payload 의 `channel` 을 **무시한다.** 이 필드는 legacy custom integration webhook 에서만 동작한다. 여러 채널로 나눠 보내려면 채널마다 webhook 을 따로 발급받는 편이 확실하다.
+
+색상은 대상에 맞게 변환된다 (`red`→`danger`, `yellow`→`warning`, `green`→`good`, `blue`→`#3aa3e3`). Slack attachment 에는 `mrkdwn_in: ["text"]` 를 넣어 본문의 백틱·볼드가 그대로 렌더링되게 한다.
 
 > 근본 대책은 allowlist 를 **Never expires** 로 두는 것이다. 만료를 "예외는 시한부로만 허용한다"는 거버넌스 장치로 일부러 쓰는 경우에만 이 감시가 필요하다.
 
@@ -269,6 +296,8 @@ Critical CVE 가 `critical_cve_threshold`(기본 1) 이상이면 이벤트 색�
 ├── harbor.go               # Harbor v2.0 API 읽기 전용 클라이언트 (만료 감시용)
 ├── expiry.go               # CVE allowlist / robot 계정 만료 감시기
 ├── expiry_test.go
+├── notify.go               # Dooray / Slack 알림 전송 추상화
+├── notify_test.go
 ├── config.example.yaml     # 설정 예제
 ├── start.sh                # 빌드 후 백그라운드 기동 (PID 기록)
 ├── stop.sh                 # PID 파일로 종료
@@ -279,6 +308,17 @@ Critical CVE 가 `critical_cve_threshold`(기본 1) 이상이면 이벤트 색�
 ```
 
 ## Changelog
+
+### 2026-08-13 — feature/expiry-watch (2)
+
+- 만료 경고를 Dooray 뿐 아니라 **Slack** 으로도 보낼 수 있게 확장
+  - `Notification`(제목·본문·색상) 과 `Notifier` 인터페이스를 도입해 전송 대상과 메시지 생성을 분리. `DoorayNotifier` / `SlackNotifier` 가 각자 포맷으로 변환한다
+  - 색상은 대상별로 변환 (`red`→`danger` 등), Slack 은 `mrkdwn_in: ["text"]` 를 붙여 백틱·볼드가 렌더링되게 함
+  - `slack.channel` 은 `#` 없이 써도 자동으로 붙는다. 채널 ID(`C01ABCDEFG`) 는 그대로 둔다
+  - 양쪽 설정 시 모두 전송하고, 한쪽이 실패해도 다른 쪽 전송은 계속한다
+  - Slack 만 설정하면 `dooray.default_webhook_url` 폴백을 끈다 (이중 알림 방지)
+  - 기존 `expiry_watch.webhook_url` 은 `expiry_watch.dooray.webhook_url` 의 별칭으로 계속 동작
+  - `postToDooray` 를 `postJSON(target, url, payload)` 로 일반화해 두 전송이 같은 HTTP 클라이언트·에러 처리를 공유
 
 ### 2026-08-13 — feature/expiry-watch
 

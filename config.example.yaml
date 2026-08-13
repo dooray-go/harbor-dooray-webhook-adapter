@@ -70,5 +70,21 @@ harbor:
     projects: []
     # Optional: also track robot account expiry (401 failures). Default true.
     watch_robots: true
-    # Optional: send expiry warnings elsewhere. Empty = default_webhook_url.
-    webhook_url: ""
+
+    # Where expiry warnings go. Set either, or both to send to both.
+    # If NEITHER is set, warnings fall back to dooray.default_webhook_url.
+    dooray:
+      # Empty = use dooray.default_webhook_url above.
+      webhook_url: ""
+    slack:
+      # Setting this turns off the dooray.default_webhook_url fallback, so a
+      # Slack-only setup does not keep posting to Dooray as well.
+      webhook_url: "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXX"
+      # Channel override. A leading "#" is added if you omit it.
+      # NOTE: modern Slack app webhooks are locked to the channel picked at
+      # install time and IGNORE this field; only legacy custom-integration
+      # webhooks honour it. For several channels, use one webhook per channel.
+      channel: "#harbor-alerts"
+      # Optional; both default to the dooray bot_name / bot_icon_image above.
+      username: "Harbor"
+      icon_emoji: ":whale:"

@@ -212,25 +212,31 @@ func severityBreakdown(m map[string]int) []string {
 }
 
 func (a *Adapter) postToDooray(url string, payload *DoorayWebhook) error {
+	return a.postJSON("dooray", url, payload)
+}
+
+// postJSON posts payload as JSON to url. target names the remote service in
+// error messages, so the same transport serves both Dooray and Slack.
+func (a *Adapter) postJSON(target, url string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal dooray payload: %w", err)
+		return fmt.Errorf("marshal %s payload: %w", target, err)
 	}
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("build dooray request: %w", err)
+		return fmt.Errorf("build %s request: %w", target, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send dooray request: %w", err)
+		return fmt.Errorf("send %s request: %w", target, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("dooray returned %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("%s returned %d: %s", target, resp.StatusCode, string(respBody))
 	}
 	return nil
 }
